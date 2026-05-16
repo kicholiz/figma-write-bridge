@@ -41,6 +41,12 @@ const unclaimedSockets = new Set();
 const clientSockets = new Set();
 let activeChannel = defaultChannel;
 const targetFrameIds = new Set();
+const allowedWritableFrameIds = new Set(
+  String(process.env.FIGMA_BRIDGE_ALLOWED_FRAME_IDS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+);
 const pending = new Map();
 let onceRan = false;
 
@@ -99,7 +105,9 @@ function sendCommand(action, payload, socketOverride) {
     const actionName = String(action || "");
     if (!actionName) throw new Error("Missing action");
     if (/delete|remove|reset|clear/i.test(actionName)) {
-      throw new Error(`Blocked action: ${actionName}`);
+      if (actionName !== "delete_node" && actionName !== "delete_multiple_nodes") {
+        throw new Error(`Blocked action: ${actionName}`);
+      }
     }
     if (/^(applySarawakFoundations)$/i.test(actionName)) {
       throw new Error(`Blocked action: ${actionName}`);
@@ -337,9 +345,16 @@ const ALLOWED_MCP_TOOLS = new Set([
   "move_node",
   "resize_node",
   "clone_node",
+  "delete_node",
+  "delete_multiple_nodes",
   "set_corner_radius",
   "set_text_content",
   "set_multiple_text_contents",
+  "set_layout_mode",
+  "set_padding",
+  "set_axis_align",
+  "set_layout_sizing",
+  "set_item_spacing",
   "set_focus",
   "set_selections",
   "read_my_design",
@@ -436,6 +451,11 @@ server.registerTool(
       }
     }
     if (!next.length) throw new Error("Missing frameId/frameIds");
+    for (const id of next) {
+      if (allowedWritableFrameIds.size && !allowedWritableFrameIds.has(id)) {
+        throw new Error(`Frame is not allowed: ${id}`);
+      }
+    }
     targetFrameIds.clear();
     for (const id of next) targetFrameIds.add(id);
     return { content: [{ type: "text", text: JSON.stringify({ targetFrameIds: Array.from(targetFrameIds) }, null, 2) }] };
@@ -718,6 +738,36 @@ server.registerTool(
   },
   async ({ nodeId, dx, dy }) => {
     const result = await sendCommand("clone_node", { nodeId, dx, dy });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "delete_node",
+  {
+    title: "Delete node",
+    description: "Delete a node by nodeId (only within the allowed target frame).",
+    inputSchema: {
+      nodeId: z.string()
+    }
+  },
+  async ({ nodeId }) => {
+    const result = await sendCommand("delete_node", { nodeId });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "delete_multiple_nodes",
+  {
+    title: "Delete multiple nodes",
+    description: "Delete multiple nodes by nodeIds (only within the allowed target frame).",
+    inputSchema: {
+      nodeIds: z.array(z.string())
+    }
+  },
+  async ({ nodeIds }) => {
+    const result = await sendCommand("delete_multiple_nodes", { nodeIds });
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   }
 );
