@@ -2006,8 +2006,8 @@ function selectionSummary() {
   return figma.currentPage.selection.map((n) => ({ id: n.id, name: n.name, type: n.type }));
 }
 
-function getNodeById(id) {
-  const node = figma.getNodeById(id);
+async function getNodeByIdAsync(id) {
+  const node = await figma.getNodeByIdAsync(String(id));
   if (!node) throw new Error("Node not found");
   if (node.removed) throw new Error("Node has been removed");
   return node;
@@ -2063,6 +2063,10 @@ function filterFigmaNode(node) {
   if (node.cornerRadius !== undefined) filtered.cornerRadius = node.cornerRadius;
   if (node.absoluteBoundingBox) filtered.absoluteBoundingBox = node.absoluteBoundingBox;
   if (node.characters) filtered.characters = node.characters;
+  if (node.componentId !== undefined) filtered.componentId = node.componentId;
+  if (node.componentSetId !== undefined) filtered.componentSetId = node.componentSetId;
+  if (node.componentProperties !== undefined) filtered.componentProperties = node.componentProperties;
+  if (node.variantProperties !== undefined) filtered.variantProperties = node.variantProperties;
 
   if (node.style) {
     filtered.style = {
@@ -2089,8 +2093,8 @@ function normalize01From01Or255(value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return 0;
   if (n <= 0) return 0;
-  if (n >= 1) return Math.max(0, Math.min(1, n / 255));
-  return n;
+  if (n > 1) return Math.max(0, Math.min(1, n / 255));
+  return Math.max(0, Math.min(1, n));
 }
 
 function ensureArray(value) {
@@ -2219,6 +2223,61 @@ async function moveNode(params) {
   return { success: true, nodeId: node.id, x: node.x, y: node.y };
 }
 
+async function reparentNode(params) {
+  if (!params || !params.nodeId) throw new Error("Missing nodeId parameter");
+  if (!params || !params.newParentId) throw new Error("Missing newParentId parameter");
+  const node = await figma.getNodeByIdAsync(String(params.nodeId));
+  if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
+  const nextParent = await figma.getNodeByIdAsync(String(params.newParentId));
+  if (!nextParent) throw new Error("Parent not found with ID: " + String(params.newParentId));
+  assertNodeWritable(node, params);
+  assertNodeWritable(nextParent, params);
+  if (!("appendChild" in nextParent)) throw new Error("Parent cannot contain children");
+  nextParent.appendChild(node);
+  if (params.x !== undefined || params.y !== undefined) {
+    if ("x" in node && "y" in node) {
+      if (params.x !== undefined) node.x = Number(params.x);
+      if (params.y !== undefined) node.y = Number(params.y);
+    }
+  }
+  return { success: true, nodeId: node.id, newParentId: nextParent.id };
+}
+
+async function getParentChain(params) {
+  if (!params || !params.nodeId) throw new Error("Missing nodeId parameter");
+  const node = await figma.getNodeByIdAsync(String(params.nodeId));
+  if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
+  assertNodeWritable(node, params);
+  const stopId = params.stopAtId ? String(params.stopAtId) : null;
+  const maxDepth = Number.isFinite(Number(params.maxDepth)) ? Math.max(1, Number(params.maxDepth)) : 50;
+  const chain = [];
+  let cur = node;
+  let depth = 0;
+  while (cur && depth < maxDepth) {
+    chain.push({ id: cur.id, name: cur.name, type: cur.type });
+    if (stopId && cur.id === stopId) break;
+    cur = cur.parent;
+    depth += 1;
+  }
+  return { success: true, nodeId: node.id, chain };
+}
+
+async function insertChild(params) {
+  if (!params || !params.parentId) throw new Error("Missing parentId parameter");
+  if (!params || !params.childId) throw new Error("Missing childId parameter");
+  const parent = await figma.getNodeByIdAsync(String(params.parentId));
+  if (!parent) throw new Error("Parent not found with ID: " + String(params.parentId));
+  const child = await figma.getNodeByIdAsync(String(params.childId));
+  if (!child) throw new Error("Child not found with ID: " + String(params.childId));
+  assertNodeWritable(parent, params);
+  assertNodeWritable(child, params);
+  if (!("insertChild" in parent)) throw new Error("Parent does not support insertChild");
+  const rawIndex = Number(params.index);
+  const index = Number.isFinite(rawIndex) ? Math.max(0, Math.floor(rawIndex)) : 0;
+  parent.insertChild(index, child);
+  return { success: true, parentId: parent.id, childId: child.id, index };
+}
+
 async function resizeNode(params) {
   if (!params || !params.nodeId) throw new Error("Missing nodeId parameter");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
@@ -2233,11 +2292,51 @@ async function resizeNode(params) {
 }
 
 async function deleteNode(params) {
-  throw new Error("Delete is disabled");
+  if (!params || !params.nodeId) throw new Error("Missing nodeId parameter");
+  const node = await figma.getNodeByIdAsync(String(params.nodeId));
+  if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
+  const confirmFrameOrPageDeletion =
+    params && typeof params === "object" ? params.confirmFrameOrPageDeletion === true : false;
+  if ((node.type === "FRAME" || node.type === "PAGE") && !confirmFrameOrPageDeletion) {
+    throw new Error("Confirmation required to delete a frame/page. Pass confirmFrameOrPageDeletion: true.");
+  }
+  assertNodeWritable(node, params);
+  if (!("remove" in node)) throw new Error("Node does not support remove");
+  node.remove();
+  return { success: true, nodeId: String(params.nodeId) };
 }
 
 async function deleteMultipleNodes(params) {
-  throw new Error("Delete is disabled");
+  const p = params && typeof params === "object" ? params : {};
+  const raw = Array.isArray(p.nodeIds) ? p.nodeIds : null;
+  if (!raw || raw.length === 0) throw new Error("Missing nodeIds parameter");
+  const deletedNodeIds = [];
+  const failed = [];
+  for (const id of raw) {
+    try {
+      const nodeId = String(id);
+      const node = await figma.getNodeByIdAsync(nodeId);
+      if (!node) {
+        failed.push({ nodeId, error: "Node not found" });
+        continue;
+      }
+      const confirmFrameOrPageDeletion = p.confirmFrameOrPageDeletion === true;
+      if ((node.type === "FRAME" || node.type === "PAGE") && !confirmFrameOrPageDeletion) {
+        failed.push({ nodeId, error: "Confirmation required to delete a frame/page" });
+        continue;
+      }
+      assertNodeWritable(node, p);
+      if (!("remove" in node)) {
+        failed.push({ nodeId, error: "Node does not support remove" });
+        continue;
+      }
+      node.remove();
+      deletedNodeIds.push(nodeId);
+    } catch (err) {
+      failed.push({ nodeId: String(id), error: err && err.message ? String(err.message) : String(err) });
+    }
+  }
+  return { success: true, deletedNodeIds, failed };
 }
 
 async function cloneNode(params) {
@@ -2254,6 +2353,39 @@ async function cloneNode(params) {
   figma.currentPage.selection = [cloned];
   figma.viewport.scrollAndZoomIntoView([cloned]);
   return { success: true, nodeId: cloned.id };
+}
+
+async function cloneNodeIntoParent(params) {
+  if (!params || !params.nodeId) throw new Error("Missing nodeId parameter");
+  if (!params || !params.parentNodeId) throw new Error("Missing parentNodeId parameter");
+  const node = await figma.getNodeByIdAsync(String(params.nodeId));
+  if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
+  assertNodeWritable(node, params);
+  if (!("clone" in node)) throw new Error("Node does not support clone");
+  const parent = await figma.getNodeByIdAsync(String(params.parentNodeId));
+  if (!parent) throw new Error("Parent not found with ID: " + String(params.parentNodeId));
+  assertNodeWritable(parent, params);
+  if (!("appendChild" in parent)) throw new Error("Parent cannot contain children");
+  const cloned = node.clone();
+  try {
+    parent.appendChild(cloned);
+    const dx = Number(params.dx === undefined || params.dx === null ? 0 : params.dx);
+    const dy = Number(params.dy === undefined || params.dy === null ? 0 : params.dy);
+    if ("x" in cloned && "y" in cloned) {
+      cloned.x = Number(cloned.x) + dx;
+      cloned.y = Number(cloned.y) + dy;
+    }
+    figma.currentPage.selection = [cloned];
+    figma.viewport.scrollAndZoomIntoView([cloned]);
+    return { success: true, nodeId: cloned.id, parentNodeId: parent.id };
+  } catch (err) {
+    if (cloned && "remove" in cloned) {
+      try {
+        cloned.remove();
+      } catch (_) {}
+    }
+    throw err;
+  }
 }
 
 async function setCornerRadius(params) {
@@ -2313,11 +2445,188 @@ async function createComponentInstance(params) {
   const instance = component.createInstance();
   instance.x = Number(params.x === undefined || params.x === null ? 0 : params.x);
   instance.y = Number(params.y === undefined || params.y === null ? 0 : params.y);
-  const host = resolveCreateHost(params);
+  const host = await resolveCreateHost(params);
   host.appendChild(instance);
   figma.currentPage.selection = [instance];
   figma.viewport.scrollAndZoomIntoView([instance]);
   return { success: true, nodeId: instance.id };
+}
+
+async function createInstanceFromInstance(params) {
+  if (!params || !params.instanceId) throw new Error("Missing instanceId parameter");
+  const src = await figma.getNodeByIdAsync(String(params.instanceId));
+  if (!src) throw new Error("Node not found with ID: " + String(params.instanceId));
+  if (src.type !== "INSTANCE") throw new Error("Source node is not an INSTANCE");
+  assertNodeWritable(src, params);
+  let main = null;
+  if (typeof src.getMainComponentAsync === "function") {
+    main = await src.getMainComponentAsync();
+  } else {
+    main = src.mainComponent;
+  }
+  if (!main) throw new Error("Instance has no mainComponent");
+  const instance = main.createInstance();
+  instance.x = Number(params.x === undefined || params.x === null ? 0 : params.x);
+  instance.y = Number(params.y === undefined || params.y === null ? 0 : params.y);
+  const host = await resolveCreateHost(params);
+  host.appendChild(instance);
+  figma.currentPage.selection = [instance];
+  figma.viewport.scrollAndZoomIntoView([instance]);
+  return { success: true, nodeId: instance.id };
+}
+
+async function getMainComponentForInstance(instance) {
+  if (!instance || instance.type !== "INSTANCE") throw new Error("Node is not an INSTANCE");
+  if (typeof instance.getMainComponentAsync === "function") return await instance.getMainComponentAsync();
+  return instance.mainComponent;
+}
+
+async function getInstanceSource(params) {
+  if (!params || !params.instanceId) throw new Error("Missing instanceId parameter");
+  const node = await figma.getNodeByIdAsync(String(params.instanceId));
+  if (!node) throw new Error("Node not found with ID: " + String(params.instanceId));
+  if (node.type !== "INSTANCE") throw new Error("Node is not an INSTANCE");
+  const main = await getMainComponentForInstance(node);
+  if (!main) throw new Error("Instance has no mainComponent");
+  const set = main.parent && main.parent.type === "COMPONENT_SET" ? main.parent : null;
+  const out = {
+    instanceId: node.id,
+    instanceName: node.name,
+    mainComponentId: main.id,
+    mainComponentName: main.name,
+    mainComponentKey: main.key || null,
+    mainComponentRemote: Boolean(main.remote),
+    componentSetId: set ? set.id : null,
+    componentSetName: set ? set.name : null,
+    componentSetKey: set && set.key ? set.key : null,
+    componentSetRemote: set ? Boolean(set.remote) : null,
+    componentProperties: node.componentProperties !== undefined ? node.componentProperties : null,
+    variantProperties: node.variantProperties !== undefined ? node.variantProperties : null
+  };
+  return out;
+}
+
+async function scanInstancesWithSources(params) {
+  await figma.currentPage.loadAsync();
+  const rootNodeId = params && params.rootNodeId ? String(params.rootNodeId) : null;
+  const chunkSize = params && params.chunkSize ? Number(params.chunkSize) : 200;
+  const offset = params && params.offset ? Number(params.offset) : 0;
+  let root = null;
+  if (rootNodeId) root = await figma.getNodeByIdAsync(rootNodeId);
+  const container = root && root.type !== "DOCUMENT" ? root : figma.currentPage;
+  const nodes = container.findAll((n) => n.type === "INSTANCE");
+  const total = nodes.length;
+  const slice = nodes.slice(offset, offset + chunkSize);
+  const items = [];
+  for (const inst of slice) {
+    try {
+      const main = await getMainComponentForInstance(inst);
+      const set = main && main.parent && main.parent.type === "COMPONENT_SET" ? main.parent : null;
+      items.push({
+        instanceId: inst.id,
+        instanceName: inst.name,
+        mainComponentId: main ? main.id : null,
+        mainComponentName: main ? main.name : null,
+        mainComponentKey: main && main.key ? main.key : null,
+        mainComponentRemote: main ? Boolean(main.remote) : null,
+        componentSetId: set ? set.id : null,
+        componentSetName: set ? set.name : null,
+        componentSetKey: set && set.key ? set.key : null,
+        componentSetRemote: set ? Boolean(set.remote) : null
+      });
+    } catch (err) {
+      items.push({
+        instanceId: inst.id,
+        instanceName: inst.name,
+        error: err && err.message ? String(err.message) : String(err)
+      });
+    }
+  }
+  return { success: true, total, offset, chunkSize, items };
+}
+
+async function importComponentByKey(params) {
+  if (!params || !params.componentKey) throw new Error("Missing componentKey parameter");
+  const key = String(params.componentKey);
+  const component = await figma.importComponentByKeyAsync(key);
+  return { success: true, componentId: component.id, componentKey: component.key || key, name: component.name, remote: Boolean(component.remote) };
+}
+
+async function importComponentSetByKey(params) {
+  if (!params || !params.componentSetKey) throw new Error("Missing componentSetKey parameter");
+  const key = String(params.componentSetKey);
+  const set = await figma.importComponentSetByKeyAsync(key);
+  const def = set.defaultVariant || null;
+  return {
+    success: true,
+    componentSetId: set.id,
+    componentSetKey: set.key || key,
+    name: set.name,
+    remote: Boolean(set.remote),
+    defaultComponentId: def ? def.id : null,
+    defaultComponentKey: def && def.key ? def.key : null
+  };
+}
+
+async function createInstanceFromComponentKey(params) {
+  if (!params || !params.componentKey) throw new Error("Missing componentKey parameter");
+  const key = String(params.componentKey);
+  const component = await figma.importComponentByKeyAsync(key);
+  const instance = component.createInstance();
+  instance.x = Number(params.x === undefined || params.x === null ? 0 : params.x);
+  instance.y = Number(params.y === undefined || params.y === null ? 0 : params.y);
+  const host = await resolveCreateHost(params);
+  host.appendChild(instance);
+  figma.currentPage.selection = [instance];
+  figma.viewport.scrollAndZoomIntoView([instance]);
+  return { success: true, nodeId: instance.id };
+}
+
+async function createInstanceFromComponentSetKey(params) {
+  if (!params || !params.componentSetKey) throw new Error("Missing componentSetKey parameter");
+  const key = String(params.componentSetKey);
+  const set = await figma.importComponentSetByKeyAsync(key);
+  if (!set.defaultVariant) throw new Error("Component set has no defaultVariant");
+  const instance = set.defaultVariant.createInstance();
+  instance.x = Number(params.x === undefined || params.x === null ? 0 : params.x);
+  instance.y = Number(params.y === undefined || params.y === null ? 0 : params.y);
+  const host = await resolveCreateHost(params);
+  host.appendChild(instance);
+  figma.currentPage.selection = [instance];
+  figma.viewport.scrollAndZoomIntoView([instance]);
+  return { success: true, nodeId: instance.id };
+}
+
+async function getInstanceProperties(params) {
+  if (!params || !params.instanceId) throw new Error("Missing instanceId parameter");
+  const node = await figma.getNodeByIdAsync(String(params.instanceId));
+  if (!node) throw new Error("Node not found with ID: " + String(params.instanceId));
+  if (node.type !== "INSTANCE") throw new Error("Node is not an INSTANCE");
+  return { success: true, instanceId: node.id, componentProperties: node.componentProperties || {} };
+}
+
+async function setInstanceProperties(params) {
+  if (!params || !params.instanceId) throw new Error("Missing instanceId parameter");
+  const props = params && params.properties && typeof params.properties === "object" ? params.properties : null;
+  if (!props) throw new Error("Missing properties parameter");
+  const node = await figma.getNodeByIdAsync(String(params.instanceId));
+  if (!node) throw new Error("Node not found with ID: " + String(params.instanceId));
+  if (node.type !== "INSTANCE") throw new Error("Node is not an INSTANCE");
+  assertNodeWritable(node, params);
+  node.setProperties(props);
+  return { success: true, instanceId: node.id };
+}
+
+async function swapInstanceComponent(params) {
+  if (!params || !params.instanceId) throw new Error("Missing instanceId parameter");
+  if (!params || !params.newComponentKey) throw new Error("Missing newComponentKey parameter");
+  const node = await figma.getNodeByIdAsync(String(params.instanceId));
+  if (!node) throw new Error("Node not found with ID: " + String(params.instanceId));
+  if (node.type !== "INSTANCE") throw new Error("Node is not an INSTANCE");
+  assertNodeWritable(node, params);
+  const component = await figma.importComponentByKeyAsync(String(params.newComponentKey));
+  node.swapComponent(component);
+  return { success: true, instanceId: node.id, newComponentId: component.id };
 }
 
 function uint8ToBase64(bytes) {
@@ -2516,6 +2825,7 @@ async function setLayoutMode(params) {
   if (!params || !params.nodeId) throw new Error("Missing nodeId");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
+  assertNodeWritable(node, params);
   if (!("layoutMode" in node)) throw new Error("Node does not support auto layout");
   node.layoutMode = String(params.layoutMode || "NONE");
   if (params.layoutWrap !== undefined && "layoutWrap" in node) node.layoutWrap = String(params.layoutWrap);
@@ -2526,6 +2836,7 @@ async function setPadding(params) {
   if (!params || !params.nodeId) throw new Error("Missing nodeId");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
+  assertNodeWritable(node, params);
   if (!("paddingTop" in node)) throw new Error("Node does not support auto layout padding");
   if (params.top !== undefined) node.paddingTop = Number(params.top);
   if (params.right !== undefined) node.paddingRight = Number(params.right);
@@ -2538,6 +2849,7 @@ async function setAxisAlign(params) {
   if (!params || !params.nodeId) throw new Error("Missing nodeId");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
+  assertNodeWritable(node, params);
   if (!("primaryAxisAlignItems" in node)) throw new Error("Node does not support auto layout alignment");
   if (params.primaryAxisAlignItems !== undefined) node.primaryAxisAlignItems = String(params.primaryAxisAlignItems);
   if (params.counterAxisAlignItems !== undefined) node.counterAxisAlignItems = String(params.counterAxisAlignItems);
@@ -2548,6 +2860,7 @@ async function setLayoutSizing(params) {
   if (!params || !params.nodeId) throw new Error("Missing nodeId");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
+  assertNodeWritable(node, params);
   if ("primaryAxisSizingMode" in node && params.primaryAxisSizingMode !== undefined) {
     node.primaryAxisSizingMode = String(params.primaryAxisSizingMode);
   }
@@ -2567,6 +2880,7 @@ async function setItemSpacing(params) {
   if (!params || !params.nodeId) throw new Error("Missing nodeId");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
+  assertNodeWritable(node, params);
   if (!("itemSpacing" in node)) throw new Error("Node does not support auto layout itemSpacing");
   node.itemSpacing = Number(params.itemSpacing);
   return { success: true, nodeId: node.id, itemSpacing: node.itemSpacing };
@@ -2588,11 +2902,21 @@ const ALLOWED_ACTIONS = new Set([
   "read_my_design",
   "get_node_info",
   "get_nodes_info",
+  "get_instance_source",
+  "scan_instances_with_sources",
   "set_focus",
   "set_selections",
   "get_styles",
   "get_local_components",
   "create_component_instance",
+  "create_instance_from_instance",
+  "import_component_by_key",
+  "import_component_set_by_key",
+  "create_instance_from_component_key",
+  "create_instance_from_component_set_key",
+  "get_instance_properties",
+  "set_instance_properties",
+  "swap_instance_component",
   "export_node_as_image",
   "scan_text_nodes",
   "create_rectangle",
@@ -2600,9 +2924,20 @@ const ALLOWED_ACTIONS = new Set([
   "create_text",
   "set_fill_color",
   "set_stroke_color",
+  "set_layout_mode",
+  "set_padding",
+  "set_axis_align",
+  "set_layout_sizing",
+  "set_item_spacing",
   "move_node",
+  "reparent_node",
+  "get_parent_chain",
+  "insert_child",
   "resize_node",
+  "delete_node",
+  "delete_multiple_nodes",
   "clone_node",
+  "clone_node_into_parent",
   "set_corner_radius",
   "set_text_content",
   "set_multiple_text_contents",
@@ -2617,14 +2952,7 @@ const ALLOWED_ACTIONS = new Set([
 ]);
 
 function getPolicyTargetFrameIds(params) {
-  const p = params && typeof params === "object" ? params : {};
-  const policy = p.__policy && typeof p.__policy === "object" ? p.__policy : null;
-  const raw = policy && Array.isArray(policy.targetFrameIds) ? policy.targetFrameIds : [];
-  const set = new Set();
-  for (const id of raw) {
-    if (typeof id === "string" && id.trim()) set.add(id.trim());
-  }
-  return set;
+  return new Set();
 }
 
 function isNodeInTargetFrames(node, targetFrameIds) {
@@ -2638,31 +2966,21 @@ function isNodeInTargetFrames(node, targetFrameIds) {
 }
 
 function assertNodeWritable(node, params) {
-  const targets = getPolicyTargetFrameIds(params);
-  if (targets.size === 0) return;
-  if (!isNodeInTargetFrames(node, targets)) throw new Error("Write blocked: node is outside target frame(s)");
+  return;
 }
 
-function resolveCreateHost(params) {
-  const targets = getPolicyTargetFrameIds(params);
+async function resolveCreateHost(params) {
   const p = params && typeof params === "object" ? params : {};
   const parentNodeId = p.parentNodeId ? String(p.parentNodeId) : null;
   if (parentNodeId) {
-    const host = getNodeById(parentNodeId);
-    if (targets.size && !isNodeInTargetFrames(host, targets)) throw new Error("Write blocked: parent is outside target frame(s)");
+    const host = await getNodeByIdAsync(parentNodeId);
     if (!("appendChild" in host)) throw new Error("Parent cannot contain children");
-    return host;
-  }
-  if (targets.size) {
-    const first = Array.from(targets)[0];
-    const host = getNodeById(first);
-    if (!("appendChild" in host)) throw new Error("Target frame cannot contain children");
     return host;
   }
   return figma.currentPage;
 }
 
-function createFrameNode(p) {
+async function createFrameNode(p) {
   const frame = figma.createFrame();
   frame.resize(
     Number(p.width === undefined || p.width === null ? 320 : p.width),
@@ -2671,14 +2989,14 @@ function createFrameNode(p) {
   frame.x = Number(p.x === undefined || p.x === null ? 0 : p.x);
   frame.y = Number(p.y === undefined || p.y === null ? 0 : p.y);
   frame.name = p.name ? String(p.name) : "Frame";
-  const host = resolveCreateHost(p);
+  const host = await resolveCreateHost(p);
   host.appendChild(frame);
   figma.currentPage.selection = [frame];
   figma.viewport.scrollAndZoomIntoView([frame]);
   return { nodeId: frame.id, name: frame.name, type: frame.type };
 }
 
-function createRectangleNode(p) {
+async function createRectangleNode(p) {
   const rect = figma.createRectangle();
   rect.resize(
     Number(p.width === undefined || p.width === null ? 240 : p.width),
@@ -2687,7 +3005,7 @@ function createRectangleNode(p) {
   rect.x = Number(p.x === undefined || p.x === null ? 0 : p.x);
   rect.y = Number(p.y === undefined || p.y === null ? 0 : p.y);
   rect.name = p.name ? String(p.name) : "Rectangle";
-  const host = resolveCreateHost(p);
+  const host = await resolveCreateHost(p);
   host.appendChild(rect);
   figma.currentPage.selection = [rect];
   figma.viewport.scrollAndZoomIntoView([rect]);
@@ -2703,7 +3021,7 @@ async function createTextNode(p) {
   text.y = Number(p.y === undefined || p.y === null ? 0 : p.y);
   text.characters = p.characters === undefined || p.characters === null ? "" : String(p.characters);
   text.name = p.name ? String(p.name) : "Text";
-  const host = resolveCreateHost(p);
+  const host = await resolveCreateHost(p);
   host.appendChild(text);
   figma.currentPage.selection = [text];
   figma.viewport.scrollAndZoomIntoView([text]);
@@ -3001,20 +3319,15 @@ async function handleAction(action, payload) {
   }
 
   if (/delete|remove|reset|clear/i.test(String(action))) {
-    throw new Error(`Blocked action: ${action}`);
+    if (action !== "delete_node" && action !== "delete_multiple_nodes") {
+      throw new Error(`Blocked action: ${action}`);
+    }
   }
-
-  const targetFrameIds = getPolicyTargetFrameIds(p);
-  const allowWriteWithoutTargets = action === "create_frame" || action === "createFrame";
   const isReadAction =
     action === "ping" ||
-    /^(get_|scan_|export_|read_)/.test(action) ||
+    /^(get_|scan_|export_|read_|import_)/.test(action) ||
     action === "getDocumentInfo" ||
     action === "getSelection";
-
-  if (!isReadAction && !allowWriteWithoutTargets && targetFrameIds.size === 0) {
-    throw new Error("No target frame set. Call set_target_frame first.");
-  }
 
   if (action === "ping") {
     return { pong: true };
@@ -5212,6 +5525,14 @@ async function handleAction(action, payload) {
     return await getNodesInfo(p.nodeIds);
   }
 
+  if (action === "get_instance_source") {
+    return await getInstanceSource(p);
+  }
+
+  if (action === "scan_instances_with_sources") {
+    return await scanInstancesWithSources(p);
+  }
+
   if (action === "set_focus") {
     return await setFocus(p);
   }
@@ -5221,11 +5542,11 @@ async function handleAction(action, payload) {
   }
 
   if (action === "create_rectangle") {
-    return createRectangleNode(p);
+    return await createRectangleNode(p);
   }
 
   if (action === "create_frame") {
-    return createFrameNode(p);
+    return await createFrameNode(p);
   }
 
   if (action === "create_text") {
@@ -5244,6 +5565,18 @@ async function handleAction(action, payload) {
     return await moveNode(p);
   }
 
+  if (action === "reparent_node") {
+    return await reparentNode(p);
+  }
+
+  if (action === "get_parent_chain") {
+    return await getParentChain(p);
+  }
+
+  if (action === "insert_child") {
+    return await insertChild(p);
+  }
+
   if (action === "resize_node") {
     return await resizeNode(p);
   }
@@ -5258,6 +5591,10 @@ async function handleAction(action, payload) {
 
   if (action === "clone_node") {
     return await cloneNode(p);
+  }
+
+  if (action === "clone_node_into_parent") {
+    return await cloneNodeIntoParent(p);
   }
 
   if (action === "set_corner_radius") {
@@ -5286,6 +5623,38 @@ async function handleAction(action, payload) {
 
   if (action === "create_component_instance") {
     return await createComponentInstance(p);
+  }
+
+  if (action === "create_instance_from_instance") {
+    return await createInstanceFromInstance(p);
+  }
+
+  if (action === "import_component_by_key") {
+    return await importComponentByKey(p);
+  }
+
+  if (action === "import_component_set_by_key") {
+    return await importComponentSetByKey(p);
+  }
+
+  if (action === "create_instance_from_component_key") {
+    return await createInstanceFromComponentKey(p);
+  }
+
+  if (action === "create_instance_from_component_set_key") {
+    return await createInstanceFromComponentSetKey(p);
+  }
+
+  if (action === "get_instance_properties") {
+    return await getInstanceProperties(p);
+  }
+
+  if (action === "set_instance_properties") {
+    return await setInstanceProperties(p);
+  }
+
+  if (action === "swap_instance_component") {
+    return await swapInstanceComponent(p);
   }
 
   if (action === "export_node_as_image") {
@@ -5357,7 +5726,7 @@ async function handleAction(action, payload) {
   }
 
   if (action === "renameNode") {
-    const node = getNodeById(String(p.nodeId));
+    const node = await getNodeByIdAsync(String(p.nodeId));
     assertNodeWritable(node, p);
     node.name = p.name === undefined || p.name === null ? "" : String(p.name);
     return { nodeId: node.id, name: node.name };
@@ -5365,7 +5734,7 @@ async function handleAction(action, payload) {
 
   if (action === "setText") {
     const nodeId = p.nodeId ? String(p.nodeId) : null;
-    const target = nodeId ? getNodeById(nodeId) : figma.currentPage.selection[0];
+    const target = nodeId ? await getNodeByIdAsync(nodeId) : figma.currentPage.selection[0];
     if (!target || target.type !== "TEXT") throw new Error("Select a TEXT node or pass nodeId");
     assertNodeWritable(target, p);
     await loadTextFont(target);
@@ -5374,11 +5743,11 @@ async function handleAction(action, payload) {
   }
 
   if (action === "createFrame") {
-    return createFrameNode(p);
+    return await createFrameNode(p);
   }
 
   if (action === "createRectangle") {
-    return createRectangleNode(p);
+    return await createRectangleNode(p);
   }
 
   if (action === "get_file_theme") {
@@ -5400,7 +5769,7 @@ async function handleAction(action, payload) {
   }
 
   if (action === "setSolidFill") {
-    const node = getNodeById(String(p.nodeId));
+    const node = await getNodeByIdAsync(String(p.nodeId));
     assertNodeWritable(node, p);
     if (!("fills" in node)) throw new Error("Node does not support fills");
     const r = Number(p.r);
