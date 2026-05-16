@@ -332,6 +332,15 @@ const ALLOWED_MCP_TOOLS = new Set([
   "get_selection",
   "get_node_info",
   "get_nodes_info",
+  "get_instance_source",
+  "scan_instances_with_sources",
+  "import_component_by_key",
+  "import_component_set_by_key",
+  "create_instance_from_component_key",
+  "create_instance_from_component_set_key",
+  "get_instance_properties",
+  "set_instance_properties",
+  "swap_instance_component",
   "get_styles",
   "get_local_components",
   "create_component_instance",
@@ -637,6 +646,151 @@ server.registerTool(
   },
   async ({ nodeIds }) => {
     const result = await sendCommand("get_nodes_info", { nodeIds });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "get_instance_source",
+  {
+    title: "Get instance source",
+    description: "Get main component/component-set keys and properties for an instance (to verify design system provenance).",
+    inputSchema: {
+      instanceId: z.string()
+    }
+  },
+  async ({ instanceId }) => {
+    const result = await sendCommand("get_instance_source", { instanceId });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "scan_instances_with_sources",
+  {
+    title: "Scan instances with sources",
+    description: "Scan instances under a root node and return their main component/component-set keys.",
+    inputSchema: {
+      rootNodeId: z.string().optional(),
+      chunkSize: z.number().optional(),
+      offset: z.number().optional()
+    }
+  },
+  async ({ rootNodeId, chunkSize, offset }) => {
+    const result = await sendCommand("scan_instances_with_sources", { rootNodeId, chunkSize, offset });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "import_component_by_key",
+  {
+    title: "Import component by key",
+    description: "Import a library component into the current file using its componentKey.",
+    inputSchema: {
+      componentKey: z.string()
+    }
+  },
+  async ({ componentKey }) => {
+    const result = await sendCommand("import_component_by_key", { componentKey });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "import_component_set_by_key",
+  {
+    title: "Import component set by key",
+    description: "Import a library component set into the current file using its componentSetKey.",
+    inputSchema: {
+      componentSetKey: z.string()
+    }
+  },
+  async ({ componentSetKey }) => {
+    const result = await sendCommand("import_component_set_by_key", { componentSetKey });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "create_instance_from_component_key",
+  {
+    title: "Create instance from component key",
+    description: "Create an instance from a library component key inside the target frame/parent.",
+    inputSchema: {
+      componentKey: z.string(),
+      parentNodeId: z.string().optional(),
+      x: z.number().optional(),
+      y: z.number().optional()
+    }
+  },
+  async ({ componentKey, parentNodeId, x, y }) => {
+    const result = await sendCommand("create_instance_from_component_key", { componentKey, parentNodeId, x, y });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "create_instance_from_component_set_key",
+  {
+    title: "Create instance from component set key",
+    description: "Create an instance from a library component set key (default variant) inside the target frame/parent.",
+    inputSchema: {
+      componentSetKey: z.string(),
+      parentNodeId: z.string().optional(),
+      x: z.number().optional(),
+      y: z.number().optional()
+    }
+  },
+  async ({ componentSetKey, parentNodeId, x, y }) => {
+    const result = await sendCommand("create_instance_from_component_set_key", { componentSetKey, parentNodeId, x, y });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "get_instance_properties",
+  {
+    title: "Get instance properties",
+    description: "Get componentProperties for an instance.",
+    inputSchema: {
+      instanceId: z.string()
+    }
+  },
+  async ({ instanceId }) => {
+    const result = await sendCommand("get_instance_properties", { instanceId });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "set_instance_properties",
+  {
+    title: "Set instance properties",
+    description: "Set component properties/variants on an instance.",
+    inputSchema: {
+      instanceId: z.string(),
+      properties: z.record(z.union([z.string(), z.number(), z.boolean()]))
+    }
+  },
+  async ({ instanceId, properties }) => {
+    const result = await sendCommand("set_instance_properties", { instanceId, properties });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "swap_instance_component",
+  {
+    title: "Swap instance component",
+    description: "Swap an instance to a different library component key.",
+    inputSchema: {
+      instanceId: z.string(),
+      newComponentKey: z.string()
+    }
+  },
+  async ({ instanceId, newComponentKey }) => {
+    const result = await sendCommand("swap_instance_component", { instanceId, newComponentKey });
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   }
 );
