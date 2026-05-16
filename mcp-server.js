@@ -114,7 +114,7 @@ function sendCommand(action, payload, socketOverride) {
     }
 
     const isReadAction =
-      /^(ping|get_|scan_|export_)/.test(actionName) ||
+      /^(ping|get_|scan_|export_|import_)/.test(actionName) ||
       /^(getSelection|getDocumentInfo|getDocumentInfo|getNode|getNodeById|scanTree|getStyles|getLocalComponents|get_document_info|get_selection|get_node|get_styles|get_local_components)$/i.test(
         actionName
       );
