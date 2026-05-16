@@ -41,12 +41,6 @@ const unclaimedSockets = new Set();
 const clientSockets = new Set();
 let activeChannel = defaultChannel;
 const targetFrameIds = new Set();
-const allowedWritableFrameIds = new Set(
-  String(process.env.FIGMA_BRIDGE_ALLOWED_FRAME_IDS || "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean)
-);
 const pending = new Map();
 let onceRan = false;
 
@@ -118,19 +112,6 @@ function sendCommand(action, payload, socketOverride) {
       /^(getSelection|getDocumentInfo|getDocumentInfo|getNode|getNodeById|scanTree|getStyles|getLocalComponents|get_document_info|get_selection|get_node|get_styles|get_local_components)$/i.test(
         actionName
       );
-
-    const allowWriteWithoutTarget = /^(createFrame|create_frame)$/i.test(actionName);
-    if (!isReadAction && !allowWriteWithoutTarget && targetFrameIds.size === 0) {
-      throw new Error("No target frame set. Call set_target_frame first.");
-    }
-
-    const basePayload = payload && typeof payload === "object" ? payload : {};
-    payload = {
-      ...basePayload,
-      __policy: {
-        targetFrameIds: Array.from(targetFrameIds)
-      }
-    };
   }
 
   const id = randomUUID();
@@ -147,12 +128,6 @@ function sendCommand(action, payload, socketOverride) {
   });
 
   socket.send(JSON.stringify({ type: "command", id, action, payload }));
-  if (!socketOverride && /^(createFrame|create_frame)$/i.test(String(action || "")) && targetFrameIds.size === 0) {
-    return promise.then((result) => {
-      if (result && typeof result.nodeId === "string") targetFrameIds.add(result.nodeId);
-      return result;
-    });
-  }
   return promise;
 }
 
@@ -460,11 +435,6 @@ server.registerTool(
       }
     }
     if (!next.length) throw new Error("Missing frameId/frameIds");
-    for (const id of next) {
-      if (allowedWritableFrameIds.size && !allowedWritableFrameIds.has(id)) {
-        throw new Error(`Frame is not allowed: ${id}`);
-      }
-    }
     targetFrameIds.clear();
     for (const id of next) targetFrameIds.add(id);
     return { content: [{ type: "text", text: JSON.stringify({ targetFrameIds: Array.from(targetFrameIds) }, null, 2) }] };
