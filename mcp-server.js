@@ -303,6 +303,8 @@ const ALLOWED_MCP_TOOLS = new Set([
   "set_target_frame",
   "get_target_frames",
   "clear_target_frames",
+  "rename_node",
+  "create_buttons_v2",
   "get_document_info",
   "get_selection",
   "get_node_info",
@@ -312,7 +314,7 @@ const ALLOWED_MCP_TOOLS = new Set([
   "import_component_by_key",
   "import_component_set_by_key",
   "create_instance_from_component_key",
-  "create_instance_from_component_set_key",
+  "create_instance_from_set_key",
   "get_instance_properties",
   "set_instance_properties",
   "swap_instance_component",
@@ -329,6 +331,8 @@ const ALLOWED_MCP_TOOLS = new Set([
   "move_node",
   "resize_node",
   "clone_node",
+  "clone_node_into_parent",
+  "insert_ap_cards_below",
   "delete_node",
   "delete_multiple_nodes",
   "set_corner_radius",
@@ -413,6 +417,39 @@ server.registerTool(
         }
       ]
     };
+  }
+);
+
+server.registerTool(
+  "rename_node",
+  {
+    title: "Rename node",
+    description: "Renames a node by nodeId.",
+    inputSchema: {
+      nodeId: z.string(),
+      name: z.string()
+    }
+  },
+  async ({ nodeId, name }) => {
+    const result = await sendCommand("renameNode", { nodeId, name });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "create_buttons_v2",
+  {
+    title: "Create Buttons v2",
+    description:
+      "Creates a new Buttons v2 component set from scratch and places it 600px below the reference Buttons set (defaults to nodeId 156:640).",
+    inputSchema: {
+      referenceNodeId: z.string().optional(),
+      offsetY: z.number().optional()
+    }
+  },
+  async ({ referenceNodeId, offsetY }) => {
+    const result = await sendCommand("create_buttons_v2", { referenceNodeId, offsetY });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   }
 );
 
@@ -701,9 +738,9 @@ server.registerTool(
 );
 
 server.registerTool(
-  "create_instance_from_component_set_key",
+  "create_instance_from_set_key",
   {
-    title: "Create instance from component set key",
+    title: "Create instance from set key",
     description: "Create an instance from a library component set key (default variant) inside the target frame/parent.",
     inputSchema: {
       componentSetKey: z.string(),
@@ -862,6 +899,54 @@ server.registerTool(
   },
   async ({ nodeId, dx, dy }) => {
     const result = await sendCommand("clone_node", { nodeId, dx, dy });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "clone_node_into_parent",
+  {
+    title: "Clone node into parent",
+    description: "Clone a node and append it into a specified parent container.",
+    inputSchema: {
+      nodeId: z.string(),
+      parentNodeId: z.string(),
+      dx: z.number().optional(),
+      dy: z.number().optional()
+    }
+  },
+  async ({ nodeId, parentNodeId, dx, dy }) => {
+    const result = await sendCommand("clone_node_into_parent", { nodeId, parentNodeId, dx, dy });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "insert_ap_cards_below",
+  {
+    title: "Insert AP cards below anchor",
+    description:
+      "Clones a reference AP cards node and inserts it below an anchor node (typically the AP input) inside the same parent container.",
+    inputSchema: {
+      anchorNodeId: z.string(),
+      referenceNodeId: z.string(),
+      parentNodeId: z.string().optional(),
+      gap: z.number().optional(),
+      x: z.number().optional(),
+      y: z.number().optional(),
+      name: z.string().optional()
+    }
+  },
+  async ({ anchorNodeId, referenceNodeId, parentNodeId, gap, x, y, name }) => {
+    const result = await sendCommand("insert_ap_cards_below", {
+      anchorNodeId,
+      referenceNodeId,
+      parentNodeId,
+      gap,
+      x,
+      y,
+      name
+    });
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   }
 );
