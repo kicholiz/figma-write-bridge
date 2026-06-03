@@ -304,7 +304,6 @@ const ALLOWED_MCP_TOOLS = new Set([
   "get_target_frames",
   "clear_target_frames",
   "rename_node",
-  "create_buttons_v2",
   "get_document_info",
   "get_selection",
   "get_node_info",
@@ -319,6 +318,17 @@ const ALLOWED_MCP_TOOLS = new Set([
   "set_instance_properties",
   "swap_instance_component",
   "get_styles",
+  "create_paint_style",
+  "create_text_style",
+  "create_effect_style",
+  "create_grid_style",
+  "import_style_by_key",
+  "apply_fill_style",
+  "apply_stroke_style",
+  "apply_text_style",
+  "apply_effect_style",
+  "apply_grid_style",
+  "set_layout_grids",
   "get_local_components",
   "create_component_instance",
   "export_node_as_image",
@@ -332,12 +342,30 @@ const ALLOWED_MCP_TOOLS = new Set([
   "resize_node",
   "clone_node",
   "clone_node_into_parent",
-  "insert_ap_cards_below",
   "delete_node",
   "delete_multiple_nodes",
   "set_corner_radius",
   "set_text_content",
   "set_multiple_text_contents",
+  "get_reactions",
+  "set_reactions",
+  "clear_reactions",
+  "upsert_reaction",
+  "set_overflow_direction",
+  "set_fixed_children",
+  "list_variable_collections",
+  "list_variables",
+  "create_variable_collection",
+  "create_variable",
+  "set_variable_values",
+  "import_variable_by_key",
+  "bind_color_variable_to_fill",
+  "bind_color_variable_to_stroke",
+  "bind_variable_to_property",
+  "set_node_explicit_variable_mode",
+  "get_instance_slots",
+  "append_to_slot",
+  "set_auto_layout",
   "set_layout_mode",
   "set_padding",
   "set_axis_align",
@@ -432,23 +460,6 @@ server.registerTool(
   },
   async ({ nodeId, name }) => {
     const result = await sendCommand("renameNode", { nodeId, name });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-  }
-);
-
-server.registerTool(
-  "create_buttons_v2",
-  {
-    title: "Create Buttons v2",
-    description:
-      "Creates a new Buttons v2 component set from scratch and places it 600px below the reference Buttons set (defaults to nodeId 156:640).",
-    inputSchema: {
-      referenceNodeId: z.string().optional(),
-      offsetY: z.number().optional()
-    }
-  },
-  async ({ referenceNodeId, offsetY }) => {
-    const result = await sendCommand("create_buttons_v2", { referenceNodeId, offsetY });
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   }
 );
@@ -922,36 +933,6 @@ server.registerTool(
 );
 
 server.registerTool(
-  "insert_ap_cards_below",
-  {
-    title: "Insert AP cards below anchor",
-    description:
-      "Clones a reference AP cards node and inserts it below an anchor node (typically the AP input) inside the same parent container.",
-    inputSchema: {
-      anchorNodeId: z.string(),
-      referenceNodeId: z.string(),
-      parentNodeId: z.string().optional(),
-      gap: z.number().optional(),
-      x: z.number().optional(),
-      y: z.number().optional(),
-      name: z.string().optional()
-    }
-  },
-  async ({ anchorNodeId, referenceNodeId, parentNodeId, gap, x, y, name }) => {
-    const result = await sendCommand("insert_ap_cards_below", {
-      anchorNodeId,
-      referenceNodeId,
-      parentNodeId,
-      gap,
-      x,
-      y,
-      name
-    });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-  }
-);
-
-server.registerTool(
   "delete_node",
   {
     title: "Delete node",
@@ -1066,6 +1047,191 @@ server.registerTool(
   },
   async () => {
     const result = await sendCommand("get_styles", {});
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "create_paint_style",
+  {
+    title: "Create paint style",
+    description: "Create or update a local paint style.",
+    inputSchema: {
+      name: z.string(),
+      hex: z.string().optional(),
+      paints: z.array(z.any()).optional()
+    }
+  },
+  async ({ name, hex, paints }) => {
+    const result = await sendCommand("create_paint_style", { name, hex, paints });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "create_text_style",
+  {
+    title: "Create text style",
+    description: "Create or update a local text style.",
+    inputSchema: {
+      name: z.string(),
+      fontFamily: z.string(),
+      fontStyle: z.string().optional(),
+      fontSize: z.number().optional(),
+      lineHeight: z.number().optional(),
+      letterSpacing: z.number().optional(),
+      paragraphSpacing: z.number().optional(),
+      textCase: z.string().optional(),
+      textDecoration: z.string().optional(),
+      fillsHex: z.string().optional(),
+      fills: z.array(z.any()).optional()
+    }
+  },
+  async (args) => {
+    const result = await sendCommand("create_text_style", args);
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "create_effect_style",
+  {
+    title: "Create effect style",
+    description: "Create or update a local effect style.",
+    inputSchema: {
+      name: z.string(),
+      effects: z.array(z.any())
+    }
+  },
+  async ({ name, effects }) => {
+    const result = await sendCommand("create_effect_style", { name, effects });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "create_grid_style",
+  {
+    title: "Create grid style",
+    description: "Create or update a local grid style.",
+    inputSchema: {
+      name: z.string(),
+      layoutGrids: z.array(z.any())
+    }
+  },
+  async ({ name, layoutGrids }) => {
+    const result = await sendCommand("create_grid_style", { name, layoutGrids });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "import_style_by_key",
+  {
+    title: "Import style by key",
+    description: "Import a published library style into the file by key.",
+    inputSchema: {
+      key: z.string()
+    }
+  },
+  async ({ key }) => {
+    const result = await sendCommand("import_style_by_key", { key });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "apply_fill_style",
+  {
+    title: "Apply fill style",
+    description: "Apply a paint style to a node's fills.",
+    inputSchema: {
+      nodeId: z.string(),
+      styleId: z.string()
+    }
+  },
+  async ({ nodeId, styleId }) => {
+    const result = await sendCommand("apply_fill_style", { nodeId, styleId });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "apply_stroke_style",
+  {
+    title: "Apply stroke style",
+    description: "Apply a paint style to a node's strokes.",
+    inputSchema: {
+      nodeId: z.string(),
+      styleId: z.string()
+    }
+  },
+  async ({ nodeId, styleId }) => {
+    const result = await sendCommand("apply_stroke_style", { nodeId, styleId });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "apply_text_style",
+  {
+    title: "Apply text style",
+    description: "Apply a text style to a TEXT node.",
+    inputSchema: {
+      nodeId: z.string(),
+      styleId: z.string()
+    }
+  },
+  async ({ nodeId, styleId }) => {
+    const result = await sendCommand("apply_text_style", { nodeId, styleId });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "apply_effect_style",
+  {
+    title: "Apply effect style",
+    description: "Apply an effect style to a node's effects.",
+    inputSchema: {
+      nodeId: z.string(),
+      styleId: z.string()
+    }
+  },
+  async ({ nodeId, styleId }) => {
+    const result = await sendCommand("apply_effect_style", { nodeId, styleId });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "apply_grid_style",
+  {
+    title: "Apply grid style",
+    description: "Apply a grid style to a frame's layout grids.",
+    inputSchema: {
+      nodeId: z.string(),
+      styleId: z.string()
+    }
+  },
+  async ({ nodeId, styleId }) => {
+    const result = await sendCommand("apply_grid_style", { nodeId, styleId });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "set_layout_grids",
+  {
+    title: "Set layout grids",
+    description: "Set layout grids directly on a frame (layout guides).",
+    inputSchema: {
+      frameId: z.string(),
+      layoutGrids: z.array(z.any())
+    }
+  },
+  async ({ frameId, layoutGrids }) => {
+    const result = await sendCommand("set_layout_grids", { frameId, layoutGrids });
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   }
 );
@@ -1201,6 +1367,336 @@ server.registerTool(
   },
   async ({ nodeIds }) => {
     const result = await sendCommand("get_reactions", { nodeIds });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "set_reactions",
+  {
+    title: "Set reactions",
+    description: "Set prototype reactions on a node (replaces existing reactions).",
+    inputSchema: {
+      nodeId: z.string(),
+      reactions: z.array(z.any())
+    }
+  },
+  async ({ nodeId, reactions }) => {
+    const result = await sendCommand("set_reactions", { nodeId, reactions });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "clear_reactions",
+  {
+    title: "Clear reactions",
+    description: "Remove all prototype reactions from a node.",
+    inputSchema: {
+      nodeId: z.string()
+    }
+  },
+  async ({ nodeId }) => {
+    const result = await sendCommand("clear_reactions", { nodeId });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "upsert_reaction",
+  {
+    title: "Upsert reaction",
+    description: "Replace the first matching reaction (by trigger/action/destination) or append if none match.",
+    inputSchema: {
+      nodeId: z.string(),
+      match: z
+        .object({
+          triggerType: z.string().optional(),
+          actionType: z.string().optional(),
+          destinationId: z.string().optional()
+        })
+        .optional(),
+      reaction: z.any()
+    }
+  },
+  async ({ nodeId, match, reaction }) => {
+    const result = await sendCommand("upsert_reaction", { nodeId, match, reaction });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "set_overflow_direction",
+  {
+    title: "Set overflow direction",
+    description: "Set frame overflow direction for scrolling in prototype (NONE, HORIZONTAL, VERTICAL, BOTH).",
+    inputSchema: {
+      frameId: z.string(),
+      overflowDirection: z.string()
+    }
+  },
+  async ({ frameId, overflowDirection }) => {
+    const result = await sendCommand("set_overflow_direction", { frameId, overflowDirection });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "set_fixed_children",
+  {
+    title: "Set fixed children",
+    description: "Mark direct children of a frame as fixed in a scrolling prototype (fix position when scrolling).",
+    inputSchema: {
+      frameId: z.string(),
+      fixedChildIds: z.array(z.string())
+    }
+  },
+  async ({ frameId, fixedChildIds }) => {
+    const result = await sendCommand("set_fixed_children", { frameId, fixedChildIds });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "list_variable_collections",
+  {
+    title: "List variable collections",
+    description: "List local variable collections in the current file.",
+    inputSchema: {}
+  },
+  async () => {
+    const result = await sendCommand("list_variable_collections", {});
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "list_variables",
+  {
+    title: "List variables",
+    description: "List local variables in the current file (optionally filtered by resolvedType).",
+    inputSchema: {
+      resolvedType: z.string().optional()
+    }
+  },
+  async ({ resolvedType }) => {
+    const result = await sendCommand("list_variables", { resolvedType });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "create_variable_collection",
+  {
+    title: "Create variable collection",
+    description: "Create a local variable collection, optionally naming modes.",
+    inputSchema: {
+      name: z.string(),
+      modes: z.array(z.string()).optional()
+    }
+  },
+  async ({ name, modes }) => {
+    const result = await sendCommand("create_variable_collection", { name, modes });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "create_variable",
+  {
+    title: "Create variable",
+    description: "Create a local variable in a collection and set values by mode.",
+    inputSchema: {
+      collectionId: z.string(),
+      name: z.string(),
+      resolvedType: z.string(),
+      description: z.string().optional(),
+      scopes: z.array(z.string()).optional(),
+      valuesByMode: z.record(z.any()).optional()
+    }
+  },
+  async ({ collectionId, name, resolvedType, description, scopes, valuesByMode }) => {
+    const result = await sendCommand("create_variable", {
+      collectionId,
+      name,
+      resolvedType,
+      description,
+      scopes,
+      valuesByMode
+    });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "set_variable_values",
+  {
+    title: "Set variable values",
+    description: "Update a variable's values by mode.",
+    inputSchema: {
+      variableId: z.string(),
+      valuesByMode: z.record(z.any())
+    }
+  },
+  async ({ variableId, valuesByMode }) => {
+    const result = await sendCommand("set_variable_values", { variableId, valuesByMode });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "import_variable_by_key",
+  {
+    title: "Import variable by key",
+    description: "Import a published library variable into the file by key.",
+    inputSchema: {
+      key: z.string()
+    }
+  },
+  async ({ key }) => {
+    const result = await sendCommand("import_variable_by_key", { key });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "bind_color_variable_to_fill",
+  {
+    title: "Bind color variable to fill",
+    description: "Bind a COLOR variable to a node's fill paint.",
+    inputSchema: {
+      nodeId: z.string(),
+      variableId: z.string(),
+      paintIndex: z.number().optional()
+    }
+  },
+  async ({ nodeId, variableId, paintIndex }) => {
+    const result = await sendCommand("bind_color_variable_to_fill", { nodeId, variableId, paintIndex });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "bind_color_variable_to_stroke",
+  {
+    title: "Bind color variable to stroke",
+    description: "Bind a COLOR variable to a node's stroke paint.",
+    inputSchema: {
+      nodeId: z.string(),
+      variableId: z.string(),
+      paintIndex: z.number().optional()
+    }
+  },
+  async ({ nodeId, variableId, paintIndex }) => {
+    const result = await sendCommand("bind_color_variable_to_stroke", { nodeId, variableId, paintIndex });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "bind_variable_to_property",
+  {
+    title: "Bind variable to property",
+    description: "Bind a FLOAT/STRING/BOOLEAN variable to a node property via setBoundVariable(property, variable).",
+    inputSchema: {
+      nodeId: z.string(),
+      property: z.string(),
+      variableId: z.string()
+    }
+  },
+  async ({ nodeId, property, variableId }) => {
+    const result = await sendCommand("bind_variable_to_property", { nodeId, property, variableId });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "set_node_explicit_variable_mode",
+  {
+    title: "Set node explicit variable mode",
+    description: "Set an explicit variable mode for a node for a given collection.",
+    inputSchema: {
+      nodeId: z.string(),
+      collectionId: z.string(),
+      modeId: z.string()
+    }
+  },
+  async ({ nodeId, collectionId, modeId }) => {
+    const result = await sendCommand("set_node_explicit_variable_mode", { nodeId, collectionId, modeId });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "get_instance_slots",
+  {
+    title: "Get instance slots",
+    description: "List SLOT nodes inside an instance (for inserting content into slots).",
+    inputSchema: {
+      instanceId: z.string()
+    }
+  },
+  async ({ instanceId }) => {
+    const result = await sendCommand("get_instance_slots", { instanceId });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "append_to_slot",
+  {
+    title: "Append to slot",
+    description: "Reparent existing nodes into a SLOT node.",
+    inputSchema: {
+      slotNodeId: z.string(),
+      nodeIds: z.array(z.string())
+    }
+  },
+  async ({ slotNodeId, nodeIds }) => {
+    const result = await sendCommand("append_to_slot", { slotNodeId, nodeIds });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "set_auto_layout",
+  {
+    title: "Set auto layout",
+    description: "Set multiple auto-layout properties in one call.",
+    inputSchema: {
+      frameId: z.string(),
+      layoutMode: z.string().optional(),
+      layoutWrap: z.string().optional(),
+      primaryAxisAlignItems: z.string().optional(),
+      counterAxisAlignItems: z.string().optional(),
+      itemSpacing: z.number().optional(),
+      padding: z
+        .object({
+          top: z.number().optional(),
+          right: z.number().optional(),
+          bottom: z.number().optional(),
+          left: z.number().optional()
+        })
+        .optional(),
+      sizing: z
+        .object({
+          primaryAxisSizingMode: z.string().optional(),
+          counterAxisSizingMode: z.string().optional()
+        })
+        .optional()
+    }
+  },
+  async ({ frameId, layoutMode, layoutWrap, primaryAxisAlignItems, counterAxisAlignItems, itemSpacing, padding, sizing }) => {
+    const result = await sendCommand("set_auto_layout", {
+      frameId,
+      layoutMode,
+      layoutWrap,
+      primaryAxisAlignItems,
+      counterAxisAlignItems,
+      itemSpacing,
+      padding,
+      sizing
+    });
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   }
 );

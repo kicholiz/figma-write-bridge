@@ -196,6 +196,15 @@ async function setFillStyleId(node, styleId) {
   if ("fillStyleId" in node) node.fillStyleId = styleId;
 }
 
+async function setStrokeStyleId(node, styleId) {
+  if (!node) return;
+  if (typeof node.setStrokeStyleIdAsync === "function") {
+    await node.setStrokeStyleIdAsync(styleId);
+    return;
+  }
+  if ("strokeStyleId" in node) node.strokeStyleId = styleId;
+}
+
 async function setEffectStyleId(node, styleId) {
   if (!node) return;
   if (typeof node.setEffectStyleIdAsync === "function") {
@@ -212,6 +221,15 @@ async function setTextStyleId(node, styleId) {
     return;
   }
   if ("textStyleId" in node) node.textStyleId = styleId;
+}
+
+async function setGridStyleId(node, styleId) {
+  if (!node) return;
+  if (typeof node.setGridStyleIdAsync === "function") {
+    await node.setGridStyleIdAsync(styleId);
+    return;
+  }
+  if ("gridStyleId" in node) node.gridStyleId = styleId;
 }
 
 async function getLocalPaintStyles() {
@@ -2297,8 +2315,12 @@ async function deleteNode(params) {
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
   const confirmFrameOrPageDeletion =
     params && typeof params === "object" ? params.confirmFrameOrPageDeletion === true : false;
-  if ((node.type === "FRAME" || node.type === "PAGE") && !confirmFrameOrPageDeletion) {
-    throw new Error("Confirmation required to delete a frame/page. Pass confirmFrameOrPageDeletion: true.");
+  const isPage = node.type === "PAGE";
+  const isTopLevelFrame = node.type === "FRAME" && node.parent && node.parent.type === "PAGE";
+  if ((isPage || isTopLevelFrame) && !confirmFrameOrPageDeletion) {
+    throw new Error(
+      "Confirmation required to delete a page or a top-level frame. Pass confirmFrameOrPageDeletion: true."
+    );
   }
   assertNodeWritable(node, params);
   if (!("remove" in node)) throw new Error("Node does not support remove");
@@ -2321,8 +2343,10 @@ async function deleteMultipleNodes(params) {
         continue;
       }
       const confirmFrameOrPageDeletion = p.confirmFrameOrPageDeletion === true;
-      if ((node.type === "FRAME" || node.type === "PAGE") && !confirmFrameOrPageDeletion) {
-        failed.push({ nodeId, error: "Confirmation required to delete a frame/page" });
+      const isPage = node.type === "PAGE";
+      const isTopLevelFrame = node.type === "FRAME" && node.parent && node.parent.type === "PAGE";
+      if ((isPage || isTopLevelFrame) && !confirmFrameOrPageDeletion) {
+        failed.push({ nodeId, error: "Confirmation required to delete a page or a top-level frame" });
         continue;
       }
       assertNodeWritable(node, p);
@@ -2613,7 +2637,28 @@ async function setInstanceProperties(params) {
   if (!node) throw new Error("Node not found with ID: " + String(params.instanceId));
   if (node.type !== "INSTANCE") throw new Error("Node is not an INSTANCE");
   assertNodeWritable(node, params);
-  node.setProperties(props);
+  const componentProps = node.componentProperties || {};
+  const nextProps = {};
+  for (const key in props) {
+    if (!Object.prototype.hasOwnProperty.call(props, key)) continue;
+    const normalizedKey = String(key).replace(/\\:/g, ":");
+    let value = props[key];
+    const meta = componentProps[normalizedKey];
+    const t = meta && meta.type ? String(meta.type) : null;
+    if (t === "BOOLEAN") {
+      if (typeof value === "number") value = value !== 0;
+      if (typeof value === "string") {
+        const lowered = value.toLowerCase();
+        if (lowered === "true") value = true;
+        if (lowered === "false") value = false;
+      }
+    }
+    if ((t === "VARIANT" || t === "TEXT" || t === "INSTANCE_SWAP") && typeof value === "number") {
+      value = String(value);
+    }
+    nextProps[normalizedKey] = value;
+  }
+  node.setProperties(nextProps);
   return { success: true, instanceId: node.id };
 }
 
@@ -2819,6 +2864,619 @@ async function getReactions(params) {
   }
 
   return results;
+}
+
+function normalizeReactionTrigger(t) {
+  if (!t || typeof t !== "object") throw new Error("Reaction trigger must be an object");
+  const type = t.type === undefined || t.type === null ? "" : String(t.type);
+  if (!type) throw new Error("Reaction trigger missing type");
+  const out = Object.assign({}, t, { type });
+  return out;
+}
+
+function normalizeReactionAction(a) {
+  if (!a || typeof a !== "object") throw new Error("Reaction action must be an object");
+  const type = a.type === undefined || a.type === null ? "" : String(a.type);
+  if (!type) throw new Error("Reaction action missing type");
+  const out = Object.assign({}, a, { type });
+
+  if (type === "URL") {
+    const url = out.url === undefined || out.url === null ? "" : String(out.url);
+    if (!url) throw new Error("URL action missing url");
+    out.url = url;
+  }
+
+  if (type === "NODE") {
+    const destinationId =
+      out.destinationId === undefined || out.destinationId === null ? "" : String(out.destinationId);
+    if (!destinationId) throw new Error("NODE action missing destinationId");
+    out.destinationId = destinationId;
+    if (out.navigation !== undefined && out.navigation !== null) out.navigation = String(out.navigation);
+  }
+
+  if (type === "SET_VARIABLE") {
+    const variableId =
+      out.variableId === undefined || out.variableId === null ? "" : String(out.variableId);
+    if (!variableId) throw new Error("SET_VARIABLE action missing variableId");
+    out.variableId = variableId;
+    if (!Object.prototype.hasOwnProperty.call(out, "variableValue")) {
+      throw new Error("SET_VARIABLE action missing variableValue");
+    }
+  }
+
+  if (type === "SET_VARIABLE_MODE") {
+    const variableCollectionId =
+      out.variableCollectionId === undefined || out.variableCollectionId === null
+        ? ""
+        : String(out.variableCollectionId);
+    const modeId = out.modeId === undefined || out.modeId === null ? "" : String(out.modeId);
+    if (!variableCollectionId) throw new Error("SET_VARIABLE_MODE action missing variableCollectionId");
+    if (!modeId) throw new Error("SET_VARIABLE_MODE action missing modeId");
+    out.variableCollectionId = variableCollectionId;
+    out.modeId = modeId;
+  }
+
+  return out;
+}
+
+function normalizeReaction(r) {
+  if (!r || typeof r !== "object") throw new Error("Reaction must be an object");
+  const trigger = normalizeReactionTrigger(r.trigger);
+  const action = normalizeReactionAction(r.action);
+  const out = { trigger, action };
+  if (r.transition !== undefined) out.transition = r.transition;
+  return out;
+}
+
+async function setReactions(params) {
+  if (!params || !params.nodeId) throw new Error("Missing nodeId");
+  const node = await figma.getNodeByIdAsync(String(params.nodeId));
+  if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
+  assertNodeWritable(node, params);
+  if (!("reactions" in node)) throw new Error("Node does not support reactions");
+
+  const reactionsIn = ensureArray(params.reactions);
+  const reactions = [];
+  for (let i = 0; i < reactionsIn.length; i += 1) reactions.push(normalizeReaction(reactionsIn[i]));
+
+  node.reactions = reactions;
+  return { success: true, nodeId: node.id, reactionsCount: node.reactions.length };
+}
+
+async function clearReactions(params) {
+  if (!params || !params.nodeId) throw new Error("Missing nodeId");
+  const node = await figma.getNodeByIdAsync(String(params.nodeId));
+  if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
+  assertNodeWritable(node, params);
+  if (!("reactions" in node)) throw new Error("Node does not support reactions");
+  node.reactions = [];
+  return { success: true, nodeId: node.id, reactionsCount: 0 };
+}
+
+async function upsertReaction(params) {
+  if (!params || !params.nodeId) throw new Error("Missing nodeId");
+  const node = await figma.getNodeByIdAsync(String(params.nodeId));
+  if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
+  assertNodeWritable(node, params);
+  if (!("reactions" in node)) throw new Error("Node does not support reactions");
+
+  const match = params.match && typeof params.match === "object" ? params.match : {};
+  const triggerType = match.triggerType === undefined || match.triggerType === null ? "" : String(match.triggerType);
+  const actionType = match.actionType === undefined || match.actionType === null ? "" : String(match.actionType);
+  const destinationId =
+    match.destinationId === undefined || match.destinationId === null ? "" : String(match.destinationId);
+
+  const next = normalizeReaction(params.reaction);
+  const current = ensureArray(node.reactions);
+  let replaced = false;
+
+  for (let i = 0; i < current.length; i += 1) {
+    const r = current[i];
+    if (!r || !r.trigger || !r.action) continue;
+    if (triggerType && String(r.trigger.type) !== triggerType) continue;
+    if (actionType && String(r.action.type) !== actionType) continue;
+    if (destinationId && String(r.action.destinationId || "") !== destinationId) continue;
+    current[i] = next;
+    replaced = true;
+    break;
+  }
+
+  if (!replaced) current.push(next);
+  node.reactions = current;
+  return { success: true, nodeId: node.id, replaced: replaced, reactionsCount: node.reactions.length };
+}
+
+async function setOverflowDirection(params) {
+  if (!params || !params.frameId) throw new Error("Missing frameId");
+  const node = await figma.getNodeByIdAsync(String(params.frameId));
+  if (!node) throw new Error("Node not found with ID: " + String(params.frameId));
+  assertNodeWritable(node, params);
+  if (!("overflowDirection" in node)) throw new Error("Node does not support overflowDirection");
+  node.overflowDirection = String(params.overflowDirection || "NONE");
+  return { success: true, frameId: node.id, overflowDirection: node.overflowDirection };
+}
+
+async function setFixedChildren(params) {
+  if (!params || !params.frameId) throw new Error("Missing frameId");
+  const node = await figma.getNodeByIdAsync(String(params.frameId));
+  if (!node) throw new Error("Node not found with ID: " + String(params.frameId));
+  assertNodeWritable(node, params);
+  if (!("children" in node) || !("numberOfFixedChildren" in node)) {
+    throw new Error("Node does not support fixed children");
+  }
+
+  const ids = ensureArray(params.fixedChildIds).map((x) => String(x));
+  const set = new Set(ids);
+  const byId = new Map();
+  for (let i = 0; i < node.children.length; i += 1) byId.set(node.children[i].id, node.children[i]);
+
+  for (let i = 0; i < ids.length; i += 1) {
+    const id = ids[i];
+    if (!byId.has(id)) throw new Error("fixedChildId is not a direct child of frame: " + id);
+  }
+
+  const nonFixed = [];
+  for (let i = 0; i < node.children.length; i += 1) {
+    const child = node.children[i];
+    if (!set.has(child.id)) nonFixed.push(child);
+  }
+
+  const fixed = [];
+  for (let i = 0; i < ids.length; i += 1) {
+    const child = byId.get(ids[i]);
+    if (child) fixed.push(child);
+  }
+
+  const next = nonFixed.concat(fixed);
+  for (let i = 0; i < next.length; i += 1) node.insertChild(i, next[i]);
+  node.numberOfFixedChildren = fixed.length;
+
+  return { success: true, frameId: node.id, fixedChildrenCount: fixed.length };
+}
+
+async function listVariableCollections() {
+  const cols = await figma.variables.getLocalVariableCollectionsAsync();
+  const out = [];
+  for (let i = 0; i < cols.length; i += 1) {
+    const c = cols[i];
+    out.push({
+      id: c.id,
+      name: c.name,
+      modes: c.modes.map((m) => ({ modeId: m.modeId, name: m.name })),
+      variableIdsCount: c.variableIds ? c.variableIds.length : 0
+    });
+  }
+  return { collections: out };
+}
+
+async function listVariables(params) {
+  const resolvedType = params && params.resolvedType ? String(params.resolvedType) : undefined;
+  let vars;
+  try {
+    vars = resolvedType
+      ? await figma.variables.getLocalVariablesAsync(resolvedType)
+      : await figma.variables.getLocalVariablesAsync();
+  } catch (err) {
+    if (resolvedType) throw err;
+    const all = [];
+    const types = ["COLOR", "FLOAT", "STRING", "BOOLEAN"];
+    for (let i = 0; i < types.length; i += 1) {
+      try {
+        const part = await figma.variables.getLocalVariablesAsync(types[i]);
+        for (let j = 0; j < part.length; j += 1) all.push(part[j]);
+      } catch {}
+    }
+    vars = all;
+  }
+
+  const out = [];
+  for (let i = 0; i < vars.length; i += 1) {
+    const v = vars[i];
+    out.push({
+      id: v.id,
+      name: v.name,
+      key: v.key,
+      resolvedType: v.resolvedType,
+      variableCollectionId: v.variableCollectionId,
+      remote: Boolean(v.remote),
+      scopes: v.scopes
+    });
+  }
+  return { variables: out };
+}
+
+async function createVariableCollection(params) {
+  const name = params && params.name ? String(params.name) : "";
+  if (!name) throw new Error("Missing name");
+  const modes = ensureArray(params && params.modes).map((x) => String(x)).filter(Boolean);
+
+  const collection = figma.variables.createVariableCollection(name);
+  if (modes.length) {
+    const baseModeId = collection.modes[0].modeId;
+    collection.renameMode(baseModeId, modes[0]);
+    for (let i = 1; i < modes.length; i += 1) collection.addMode(modes[i]);
+  }
+
+  return {
+    id: collection.id,
+    name: collection.name,
+    modes: collection.modes.map((m) => ({ modeId: m.modeId, name: m.name }))
+  };
+}
+
+async function createVariable(params) {
+  const collectionId = params && params.collectionId ? String(params.collectionId) : "";
+  const name = params && params.name ? String(params.name) : "";
+  const resolvedType = params && params.resolvedType ? String(params.resolvedType) : "";
+  if (!collectionId) throw new Error("Missing collectionId");
+  if (!name) throw new Error("Missing name");
+  if (!resolvedType) throw new Error("Missing resolvedType");
+
+  const collection = await figma.variables.getVariableCollectionByIdAsync(collectionId);
+  if (!collection) throw new Error("Variable collection not found: " + collectionId);
+
+  const v = figma.variables.createVariable(name, collection, resolvedType);
+  if (params.description !== undefined && params.description !== null) v.description = String(params.description);
+  if (params.scopes !== undefined && params.scopes !== null) v.scopes = ensureArray(params.scopes).map((x) => String(x));
+
+  const valuesByMode = params && params.valuesByMode && typeof params.valuesByMode === "object" ? params.valuesByMode : {};
+  for (const [modeId, value] of Object.entries(valuesByMode)) v.setValueForMode(String(modeId), value);
+
+  return {
+    id: v.id,
+    name: v.name,
+    key: v.key,
+    resolvedType: v.resolvedType,
+    variableCollectionId: v.variableCollectionId,
+    scopes: v.scopes
+  };
+}
+
+async function setVariableValues(params) {
+  const variableId = params && params.variableId ? String(params.variableId) : "";
+  if (!variableId) throw new Error("Missing variableId");
+  const v = await figma.variables.getVariableByIdAsync(variableId);
+  if (!v) throw new Error("Variable not found: " + variableId);
+
+  const valuesByMode = params && params.valuesByMode && typeof params.valuesByMode === "object" ? params.valuesByMode : {};
+  for (const [modeId, value] of Object.entries(valuesByMode)) v.setValueForMode(String(modeId), value);
+  return { success: true, id: v.id, name: v.name };
+}
+
+async function importVariableByKey(params) {
+  const key = params && params.key ? String(params.key) : "";
+  if (!key) throw new Error("Missing key");
+  const v = await figma.variables.importVariableByKeyAsync(key);
+  return { id: v.id, name: v.name, key: v.key, resolvedType: v.resolvedType, remote: Boolean(v.remote) };
+}
+
+async function bindColorVariableToFill(params) {
+  if (!params || !params.nodeId) throw new Error("Missing nodeId");
+  if (!params.variableId) throw new Error("Missing variableId");
+  const node = await figma.getNodeByIdAsync(String(params.nodeId));
+  if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
+  assertNodeWritable(node, params);
+  if (!("fills" in node)) throw new Error("Node does not support fills");
+
+  const v = await figma.variables.getVariableByIdAsync(String(params.variableId));
+  if (!v) throw new Error("Variable not found: " + String(params.variableId));
+
+  const paintIndex = params.paintIndex === undefined || params.paintIndex === null ? 0 : Number(params.paintIndex);
+  const fills = Array.isArray(node.fills) ? node.fills.slice() : [];
+  while (fills.length <= paintIndex) fills.push({ type: "SOLID", color: { r: 0, g: 0, b: 0 } });
+
+  const base = Object.assign({}, fills[paintIndex]);
+  const bound = figma.variables.setBoundVariableForPaint(base, "color", v);
+  fills[paintIndex] = bound;
+  node.fills = fills;
+
+  return { success: true, nodeId: node.id, variableId: v.id, paintIndex: paintIndex };
+}
+
+async function bindColorVariableToStroke(params) {
+  if (!params || !params.nodeId) throw new Error("Missing nodeId");
+  if (!params.variableId) throw new Error("Missing variableId");
+  const node = await figma.getNodeByIdAsync(String(params.nodeId));
+  if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
+  assertNodeWritable(node, params);
+  if (!("strokes" in node)) throw new Error("Node does not support strokes");
+
+  const v = await figma.variables.getVariableByIdAsync(String(params.variableId));
+  if (!v) throw new Error("Variable not found: " + String(params.variableId));
+
+  const paintIndex = params.paintIndex === undefined || params.paintIndex === null ? 0 : Number(params.paintIndex);
+  const strokes = Array.isArray(node.strokes) ? node.strokes.slice() : [];
+  while (strokes.length <= paintIndex) strokes.push({ type: "SOLID", color: { r: 0, g: 0, b: 0 } });
+
+  const base = Object.assign({}, strokes[paintIndex]);
+  const bound = figma.variables.setBoundVariableForPaint(base, "color", v);
+  strokes[paintIndex] = bound;
+  node.strokes = strokes;
+
+  return { success: true, nodeId: node.id, variableId: v.id, paintIndex: paintIndex };
+}
+
+async function bindVariableToProperty(params) {
+  if (!params || !params.nodeId) throw new Error("Missing nodeId");
+  if (!params.variableId) throw new Error("Missing variableId");
+  const property = params.property === undefined || params.property === null ? "" : String(params.property);
+  if (!property) throw new Error("Missing property");
+
+  const node = await figma.getNodeByIdAsync(String(params.nodeId));
+  if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
+  assertNodeWritable(node, params);
+
+  const v = await figma.variables.getVariableByIdAsync(String(params.variableId));
+  if (!v) throw new Error("Variable not found: " + String(params.variableId));
+  if (!("setBoundVariable" in node)) throw new Error("Node does not support bound variables");
+
+  node.setBoundVariable(property, v);
+  return { success: true, nodeId: node.id, variableId: v.id, property: property };
+}
+
+async function setNodeExplicitVariableMode(params) {
+  if (!params || !params.nodeId) throw new Error("Missing nodeId");
+  if (!params.collectionId) throw new Error("Missing collectionId");
+  if (!params.modeId) throw new Error("Missing modeId");
+  const node = await figma.getNodeByIdAsync(String(params.nodeId));
+  if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
+  assertNodeWritable(node, params);
+  if (!("setExplicitVariableModeForCollection" in node)) {
+    throw new Error("Node does not support explicit variable modes");
+  }
+  const collection = await figma.variables.getVariableCollectionByIdAsync(String(params.collectionId));
+  if (!collection) throw new Error("Variable collection not found: " + String(params.collectionId));
+  node.setExplicitVariableModeForCollection(collection, String(params.modeId));
+  return { success: true, nodeId: node.id, collectionId: collection.id, modeId: String(params.modeId) };
+}
+
+async function getInstanceSlots(params) {
+  if (!params || !params.instanceId) throw new Error("Missing instanceId");
+  const node = await figma.getNodeByIdAsync(String(params.instanceId));
+  if (!node) throw new Error("Node not found with ID: " + String(params.instanceId));
+  if (node.type !== "INSTANCE") throw new Error("Node is not an INSTANCE");
+
+  const slots = [];
+
+  function walk(n, path) {
+    const nextPath = path.concat([n.name || n.type]);
+    if (n.type === "SLOT") {
+      slots.push({ slotNodeId: n.id, name: n.name, path: nextPath.join(" / ") });
+    }
+    if (n.children) {
+      for (let i = 0; i < n.children.length; i += 1) walk(n.children[i], nextPath);
+    }
+  }
+
+  walk(node, []);
+  return { instanceId: node.id, instanceName: node.name, slots: slots };
+}
+
+async function appendToSlot(params) {
+  if (!params || !params.slotNodeId) throw new Error("Missing slotNodeId");
+  const slot = await figma.getNodeByIdAsync(String(params.slotNodeId));
+  if (!slot) throw new Error("Node not found with ID: " + String(params.slotNodeId));
+  if (slot.type !== "SLOT") throw new Error("Node is not a SLOT");
+  assertNodeWritable(slot, params);
+  if (!("appendChild" in slot)) throw new Error("Slot does not support children");
+
+  const nodeIds = ensureArray(params.nodeIds).map((x) => String(x));
+  const moved = [];
+  for (let i = 0; i < nodeIds.length; i += 1) {
+    const n = await figma.getNodeByIdAsync(nodeIds[i]);
+    if (!n) throw new Error("Node not found with ID: " + nodeIds[i]);
+    assertNodeWritable(n, params);
+    slot.appendChild(n);
+    moved.push(n.id);
+  }
+  return { success: true, slotNodeId: slot.id, movedNodeIds: moved };
+}
+
+async function setAutoLayout(params) {
+  if (!params || !params.frameId) throw new Error("Missing frameId");
+  const node = await figma.getNodeByIdAsync(String(params.frameId));
+  if (!node) throw new Error("Node not found with ID: " + String(params.frameId));
+  assertNodeWritable(node, params);
+  if (!("layoutMode" in node)) throw new Error("Node does not support auto layout");
+
+  if (params.layoutMode !== undefined && params.layoutMode !== null) node.layoutMode = String(params.layoutMode);
+  if (params.layoutWrap !== undefined && params.layoutWrap !== null && "layoutWrap" in node) {
+    node.layoutWrap = String(params.layoutWrap);
+  }
+
+  if (params.padding && typeof params.padding === "object") {
+    if (!("paddingTop" in node)) throw new Error("Node does not support auto layout padding");
+    if (params.padding.top !== undefined) node.paddingTop = Number(params.padding.top);
+    if (params.padding.right !== undefined) node.paddingRight = Number(params.padding.right);
+    if (params.padding.bottom !== undefined) node.paddingBottom = Number(params.padding.bottom);
+    if (params.padding.left !== undefined) node.paddingLeft = Number(params.padding.left);
+  }
+
+  if (params.itemSpacing !== undefined && params.itemSpacing !== null && "itemSpacing" in node) {
+    node.itemSpacing = Number(params.itemSpacing);
+  }
+
+  if (params.primaryAxisAlignItems !== undefined && params.primaryAxisAlignItems !== null && "primaryAxisAlignItems" in node) {
+    node.primaryAxisAlignItems = String(params.primaryAxisAlignItems);
+  }
+  if (params.counterAxisAlignItems !== undefined && params.counterAxisAlignItems !== null && "counterAxisAlignItems" in node) {
+    node.counterAxisAlignItems = String(params.counterAxisAlignItems);
+  }
+
+  if (params.sizing && typeof params.sizing === "object") {
+    if (params.sizing.primaryAxisSizingMode !== undefined && "primaryAxisSizingMode" in node) {
+      node.primaryAxisSizingMode = String(params.sizing.primaryAxisSizingMode);
+    }
+    if (params.sizing.counterAxisSizingMode !== undefined && "counterAxisSizingMode" in node) {
+      node.counterAxisSizingMode = String(params.sizing.counterAxisSizingMode);
+    }
+  }
+
+  return {
+    success: true,
+    frameId: node.id,
+    layoutMode: node.layoutMode,
+    layoutWrap: "layoutWrap" in node ? node.layoutWrap : undefined
+  };
+}
+
+async function createPaintStyle(params) {
+  const name = params && params.name ? String(params.name) : "";
+  if (!name) throw new Error("Missing name");
+  const styles = await getLocalPaintStyles();
+  const existing = styles.find((s) => s.name === name);
+  const style = existing || figma.createPaintStyle();
+  style.name = name;
+
+  const hex = params && params.hex ? String(params.hex) : "";
+  const paints = params && params.paints ? ensureArray(params.paints) : null;
+  if (hex) {
+    style.paints = [{ type: "SOLID", color: hexToRgb01(hex) }];
+  } else if (paints) {
+    style.paints = paints;
+  } else {
+    throw new Error("Missing paints or hex");
+  }
+
+  return { id: style.id, name: style.name };
+}
+
+async function createEffectStyle(params) {
+  const name = params && params.name ? String(params.name) : "";
+  if (!name) throw new Error("Missing name");
+  const effects = ensureArray(params && params.effects);
+  if (!effects.length) throw new Error("Missing effects");
+  const styles = await getLocalEffectStyles();
+  const existing = styles.find((s) => s.name === name);
+  const style = existing || figma.createEffectStyle();
+  style.name = name;
+  style.effects = effects;
+  return { id: style.id, name: style.name };
+}
+
+async function createTextStyleAction(params) {
+  const name = params && params.name ? String(params.name) : "";
+  const fontFamily = params && params.fontFamily ? String(params.fontFamily) : "";
+  const fontStyle = params && params.fontStyle ? String(params.fontStyle) : "Regular";
+  if (!name) throw new Error("Missing name");
+  if (!fontFamily) throw new Error("Missing fontFamily");
+
+  const styles = await getLocalTextStyles();
+  const existing = styles.find((s) => s.name === name);
+  const style = existing || figma.createTextStyle();
+  style.name = name;
+
+  const fontName = await safeLoadFont(fontFamily, fontStyle);
+  style.fontName = fontName;
+
+  if (params.fontSize !== undefined && params.fontSize !== null) style.fontSize = Number(params.fontSize);
+  if (params.lineHeight !== undefined && params.lineHeight !== null) {
+    style.lineHeight = { unit: "PIXELS", value: Number(params.lineHeight) };
+  }
+  if (params.letterSpacing !== undefined && params.letterSpacing !== null) {
+    style.letterSpacing = { unit: "PERCENT", value: Number(params.letterSpacing) };
+  }
+  if (params.paragraphSpacing !== undefined && params.paragraphSpacing !== null) {
+    style.paragraphSpacing = Number(params.paragraphSpacing);
+  }
+  if (params.textCase !== undefined && params.textCase !== null) style.textCase = params.textCase;
+  if (params.textDecoration !== undefined && params.textDecoration !== null) style.textDecoration = params.textDecoration;
+
+  if (params.fillsHex) {
+    style.fills = [{ type: "SOLID", color: hexToRgb01(String(params.fillsHex)) }];
+  } else if (params.fills) {
+    style.fills = ensureArray(params.fills);
+  }
+
+  return { id: style.id, name: style.name };
+}
+
+async function createGridStyle(params) {
+  const name = params && params.name ? String(params.name) : "";
+  if (!name) throw new Error("Missing name");
+  const layoutGrids = ensureArray(params && params.layoutGrids);
+  if (!layoutGrids.length) throw new Error("Missing layoutGrids");
+
+  const styles = await getLocalGridStyles();
+  const existing = styles.find((s) => s.name === name);
+  const style = existing || figma.createGridStyle();
+  style.name = name;
+  style.layoutGrids = layoutGrids;
+  return { id: style.id, name: style.name };
+}
+
+async function importStyleByKey(params) {
+  const key = params && params.key ? String(params.key) : "";
+  if (!key) throw new Error("Missing key");
+  const style = await figma.importStyleByKeyAsync(key);
+  return { id: style.id, name: style.name, type: style.type, key: style.key };
+}
+
+async function applyFillStyle(params) {
+  if (!params || !params.nodeId) throw new Error("Missing nodeId");
+  if (!params.styleId) throw new Error("Missing styleId");
+  const node = await figma.getNodeByIdAsync(String(params.nodeId));
+  if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
+  assertNodeWritable(node, params);
+  if (!("fills" in node)) throw new Error("Node does not support fills");
+  await setFillStyleId(node, String(params.styleId));
+  return { success: true, nodeId: node.id, styleId: String(params.styleId) };
+}
+
+async function applyStrokeStyle(params) {
+  if (!params || !params.nodeId) throw new Error("Missing nodeId");
+  if (!params.styleId) throw new Error("Missing styleId");
+  const node = await figma.getNodeByIdAsync(String(params.nodeId));
+  if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
+  assertNodeWritable(node, params);
+  if (!("strokes" in node)) throw new Error("Node does not support strokes");
+  await setStrokeStyleId(node, String(params.styleId));
+  return { success: true, nodeId: node.id, styleId: String(params.styleId) };
+}
+
+async function applyEffectStyle(params) {
+  if (!params || !params.nodeId) throw new Error("Missing nodeId");
+  if (!params.styleId) throw new Error("Missing styleId");
+  const node = await figma.getNodeByIdAsync(String(params.nodeId));
+  if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
+  assertNodeWritable(node, params);
+  if (!("effects" in node)) throw new Error("Node does not support effects");
+  await setEffectStyleId(node, String(params.styleId));
+  return { success: true, nodeId: node.id, styleId: String(params.styleId) };
+}
+
+async function applyTextStyle(params) {
+  if (!params || !params.nodeId) throw new Error("Missing nodeId");
+  if (!params.styleId) throw new Error("Missing styleId");
+  const node = await figma.getNodeByIdAsync(String(params.nodeId));
+  if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
+  assertNodeWritable(node, params);
+  if (node.type !== "TEXT") throw new Error("Node is not a TEXT node");
+  await safeLoadFont("Inter", "Regular");
+  await setTextStyleId(node, String(params.styleId));
+  return { success: true, nodeId: node.id, styleId: String(params.styleId) };
+}
+
+async function applyGridStyle(params) {
+  if (!params || !params.nodeId) throw new Error("Missing nodeId");
+  if (!params.styleId) throw new Error("Missing styleId");
+  const node = await figma.getNodeByIdAsync(String(params.nodeId));
+  if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
+  assertNodeWritable(node, params);
+  if (!("layoutGrids" in node)) throw new Error("Node does not support layoutGrids");
+  await setGridStyleId(node, String(params.styleId));
+  return { success: true, nodeId: node.id, styleId: String(params.styleId) };
+}
+
+async function setLayoutGrids(params) {
+  if (!params || !params.frameId) throw new Error("Missing frameId");
+  const node = await figma.getNodeByIdAsync(String(params.frameId));
+  if (!node) throw new Error("Node not found with ID: " + String(params.frameId));
+  assertNodeWritable(node, params);
+  if (!("layoutGrids" in node)) throw new Error("Node does not support layoutGrids");
+  const layoutGrids = ensureArray(params.layoutGrids);
+  node.layoutGrids = layoutGrids;
+  return { success: true, frameId: node.id, layoutGridsCount: node.layoutGrids.length };
 }
 
 async function setLayoutMode(params) {
@@ -5679,6 +6337,122 @@ async function handleAction(action, payload) {
 
   if (action === "get_reactions") {
     return await getReactions(p);
+  }
+
+  if (action === "set_reactions") {
+    return await setReactions(p);
+  }
+
+  if (action === "clear_reactions") {
+    return await clearReactions(p);
+  }
+
+  if (action === "upsert_reaction") {
+    return await upsertReaction(p);
+  }
+
+  if (action === "set_overflow_direction") {
+    return await setOverflowDirection(p);
+  }
+
+  if (action === "set_fixed_children") {
+    return await setFixedChildren(p);
+  }
+
+  if (action === "list_variable_collections") {
+    return await listVariableCollections(p);
+  }
+
+  if (action === "list_variables") {
+    return await listVariables(p);
+  }
+
+  if (action === "create_variable_collection") {
+    return await createVariableCollection(p);
+  }
+
+  if (action === "create_variable") {
+    return await createVariable(p);
+  }
+
+  if (action === "set_variable_values") {
+    return await setVariableValues(p);
+  }
+
+  if (action === "import_variable_by_key") {
+    return await importVariableByKey(p);
+  }
+
+  if (action === "bind_color_variable_to_fill") {
+    return await bindColorVariableToFill(p);
+  }
+
+  if (action === "bind_color_variable_to_stroke") {
+    return await bindColorVariableToStroke(p);
+  }
+
+  if (action === "bind_variable_to_property") {
+    return await bindVariableToProperty(p);
+  }
+
+  if (action === "set_node_explicit_variable_mode") {
+    return await setNodeExplicitVariableMode(p);
+  }
+
+  if (action === "get_instance_slots") {
+    return await getInstanceSlots(p);
+  }
+
+  if (action === "append_to_slot") {
+    return await appendToSlot(p);
+  }
+
+  if (action === "set_auto_layout") {
+    return await setAutoLayout(p);
+  }
+
+  if (action === "create_paint_style") {
+    return await createPaintStyle(p);
+  }
+
+  if (action === "create_text_style") {
+    return await createTextStyleAction(p);
+  }
+
+  if (action === "create_effect_style") {
+    return await createEffectStyle(p);
+  }
+
+  if (action === "create_grid_style") {
+    return await createGridStyle(p);
+  }
+
+  if (action === "import_style_by_key") {
+    return await importStyleByKey(p);
+  }
+
+  if (action === "apply_fill_style") {
+    return await applyFillStyle(p);
+  }
+
+  if (action === "apply_stroke_style") {
+    return await applyStrokeStyle(p);
+  }
+
+  if (action === "apply_text_style") {
+    return await applyTextStyle(p);
+  }
+
+  if (action === "apply_effect_style") {
+    return await applyEffectStyle(p);
+  }
+
+  if (action === "apply_grid_style") {
+    return await applyGridStyle(p);
+  }
+
+  if (action === "set_layout_grids") {
+    return await setLayoutGrids(p);
   }
 
   if (action === "set_layout_mode") {
