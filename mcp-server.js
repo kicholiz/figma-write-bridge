@@ -1512,17 +1512,19 @@ server.registerTool(
       resolvedType: z.string(),
       description: z.string().optional(),
       scopes: z.array(z.string()).optional(),
-      valuesByMode: z.record(z.any()).optional()
+      valuesByMode: z.record(z.any()).optional(),
+      valuesByModeEntries: z.array(z.object({ modeId: z.string(), value: z.any() })).optional()
     }
   },
-  async ({ collectionId, name, resolvedType, description, scopes, valuesByMode }) => {
+  async ({ collectionId, name, resolvedType, description, scopes, valuesByMode, valuesByModeEntries }) => {
     const result = await sendCommand("create_variable", {
       collectionId,
       name,
       resolvedType,
       description,
       scopes,
-      valuesByMode
+      valuesByMode,
+      valuesByModeEntries
     });
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   }
@@ -1535,11 +1537,12 @@ server.registerTool(
     description: "Update a variable's values by mode.",
     inputSchema: {
       variableId: z.string(),
-      valuesByMode: z.record(z.any())
+      valuesByMode: z.record(z.any()),
+      valuesByModeEntries: z.array(z.object({ modeId: z.string(), value: z.any() })).optional()
     }
   },
-  async ({ variableId, valuesByMode }) => {
-    const result = await sendCommand("set_variable_values", { variableId, valuesByMode });
+  async ({ variableId, valuesByMode, valuesByModeEntries }) => {
+    const result = await sendCommand("set_variable_values", { variableId, valuesByMode, valuesByModeEntries });
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   }
 );

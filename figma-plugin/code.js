@@ -382,6 +382,79 @@ function ensureArray(value) {
   return Array.isArray(value) ? value : [];
 }
 
+function normalizeValuesByMode(params) {
+  const raw =
+    params && params.valuesByMode && typeof params.valuesByMode === "object"
+      ? Object.assign({}, params.valuesByMode)
+      : {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (k.indexOf(":") >= 0) continue;
+    if (!v || typeof v !== "object" || Array.isArray(v)) continue;
+    const nestedKeys = Object.keys(v);
+    if (nestedKeys.length !== 1) continue;
+    const nestedKey = nestedKeys[0];
+    if (!/^\d+$/.test(nestedKey)) continue;
+    const compound = `${k}:${nestedKey}`;
+    if (raw[compound] !== undefined) continue;
+    raw[compound] = v[nestedKey];
+    delete raw[k];
+  }
+  const entries = ensureArray(params && params.valuesByModeEntries);
+  for (const entry of entries) {
+    if (!entry || typeof entry !== "object") continue;
+    const modeId = entry.modeId === undefined || entry.modeId === null ? "" : String(entry.modeId);
+    if (!modeId) continue;
+    raw[modeId] = entry.value;
+  }
+  return raw;
+}
+
+function resolveModeIdFromCollection(collection, providedKey) {
+  const key = providedKey === undefined || providedKey === null ? "" : String(providedKey);
+  if (!key) return null;
+  const modes = collection && Array.isArray(collection.modes) ? collection.modes : [];
+
+  for (const m of modes) {
+    if (m.modeId === key) return m.modeId;
+  }
+  for (const m of modes) {
+    if (m.name === key) return m.modeId;
+  }
+  for (let i = 0; i < modes.length; i += 1) {
+    if (String(i) === key) return modes[i].modeId;
+  }
+  if (key.indexOf(":") < 0) {
+    const matches = [];
+    for (const m of modes) {
+      const mid = m && m.modeId ? String(m.modeId) : "";
+      const prefix = mid.indexOf(":") >= 0 ? mid.split(":")[0] : mid;
+      if (prefix === key) matches.push(m);
+    }
+    if (matches.length === 1) return matches[0].modeId;
+  }
+  if (modes.length === 1) return modes[0].modeId;
+  return null;
+}
+
+function applyValuesByModeToVariable(v, collection, valuesByMode) {
+  const failures = [];
+  for (const [modeKey, value] of Object.entries(valuesByMode || {})) {
+    const resolvedModeId = resolveModeIdFromCollection(collection, modeKey);
+    if (!resolvedModeId) {
+      failures.push(String(modeKey));
+      continue;
+    }
+    v.setValueForMode(String(resolvedModeId), value);
+  }
+  if (failures.length) {
+    const modes = collection && Array.isArray(collection.modes) ? collection.modes : [];
+    const available = modes.map((m) => `${m.name} (${m.modeId})`);
+    throw new Error(
+      `Invalid mode id(s): ${failures.join(", ")}. Available modes: ${available.join(", ")}`
+    );
+  }
+}
+
 function normalizeFigmaNodeId(nodeId) {
   const raw = nodeId === undefined || nodeId === null ? "" : String(nodeId);
   if (!raw) return raw;
@@ -1630,8 +1703,8 @@ async function createVariable(params) {
   const v = figma.variables.createVariable(name, collection, resolvedType);
   if (params.description !== undefined && params.description !== null) v.description = String(params.description);
   if (params.scopes !== undefined && params.scopes !== null) v.scopes = ensureArray(params.scopes).map((x) => String(x));
-  const valuesByMode = params && params.valuesByMode && typeof params.valuesByMode === "object" ? params.valuesByMode : {};
-  for (const [modeId, value] of Object.entries(valuesByMode)) v.setValueForMode(String(modeId), value);
+  const valuesByMode = normalizeValuesByMode(params);
+  applyValuesByModeToVariable(v, collection, valuesByMode);
   return { id: v.id, name: v.name, key: v.key, resolvedType: v.resolvedType, variableCollectionId: v.variableCollectionId, scopes: v.scopes };
 }
 
@@ -1640,8 +1713,10 @@ async function setVariableValues(params) {
   if (!variableId) throw new Error("Missing variableId");
   const v = await figma.variables.getVariableByIdAsync(variableId);
   if (!v) throw new Error("Variable not found: " + variableId);
-  const valuesByMode = params && params.valuesByMode && typeof params.valuesByMode === "object" ? params.valuesByMode : {};
-  for (const [modeId, value] of Object.entries(valuesByMode)) v.setValueForMode(String(modeId), value);
+  const collection = await figma.variables.getVariableCollectionByIdAsync(v.variableCollectionId);
+  if (!collection) throw new Error("Variable collection not found: " + v.variableCollectionId);
+  const valuesByMode = normalizeValuesByMode(params);
+  applyValuesByModeToVariable(v, collection, valuesByMode);
   return { success: true, id: v.id, name: v.name };
 }
 
