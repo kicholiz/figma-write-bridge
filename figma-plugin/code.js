@@ -436,6 +436,46 @@ function resolveModeIdFromCollection(collection, providedKey) {
   return null;
 }
 
+function parseRgbTriplet01(value) {
+  const raw = String(value).trim();
+  const parts = raw.split(/\s+/).filter(Boolean);
+  if (parts.length !== 3) return null;
+  const r255 = Number(parts[0]);
+  const g255 = Number(parts[1]);
+  const b255 = Number(parts[2]);
+  if (![r255, g255, b255].every((x) => Number.isFinite(x))) return null;
+  return { r: clamp01(r255 / 255), g: clamp01(g255 / 255), b: clamp01(b255 / 255) };
+}
+
+function parseFloatToken(value) {
+  const raw = String(value).trim();
+  if (!raw) return null;
+  const n = Number.parseFloat(raw);
+  if (!Number.isFinite(n)) return null;
+  return n;
+}
+
+function coerceVariableValue(resolvedType, value) {
+  const t = resolvedType === undefined || resolvedType === null ? "" : String(resolvedType);
+  if (t === "COLOR") {
+    if (typeof value === "string") {
+      const s = value.trim();
+      if (s.startsWith("#")) return parseHexToRgb01(s);
+      const triplet = parseRgbTriplet01(s);
+      if (triplet) return triplet;
+    }
+    return value;
+  }
+  if (t === "FLOAT") {
+    if (typeof value === "string") {
+      const n = parseFloatToken(value);
+      if (n !== null) return n;
+    }
+    return value;
+  }
+  return value;
+}
+
 function applyValuesByModeToVariable(v, collection, valuesByMode) {
   const failures = [];
   for (const [modeKey, value] of Object.entries(valuesByMode || {})) {
@@ -444,7 +484,8 @@ function applyValuesByModeToVariable(v, collection, valuesByMode) {
       failures.push(String(modeKey));
       continue;
     }
-    v.setValueForMode(String(resolvedModeId), value);
+    const coerced = coerceVariableValue(v && v.resolvedType, value);
+    v.setValueForMode(String(resolvedModeId), coerced);
   }
   if (failures.length) {
     const modes = collection && Array.isArray(collection.modes) ? collection.modes : [];
@@ -868,8 +909,12 @@ async function cloneNodeIntoParent(params) {
     const dx = Number(params.dx === undefined || params.dx === null ? 0 : params.dx);
     const dy = Number(params.dy === undefined || params.dy === null ? 0 : params.dy);
     if ("x" in cloned && "y" in cloned) { cloned.x = Number(cloned.x) + dx; cloned.y = Number(cloned.y) + dy; }
-    figma.currentPage.selection = [cloned];
-    figma.viewport.scrollAndZoomIntoView([cloned]);
+    let containingPage = parent;
+    while (containingPage && containingPage.type !== "PAGE") containingPage = containingPage.parent;
+    if (containingPage && figma.currentPage && containingPage.id === figma.currentPage.id) {
+      figma.currentPage.selection = [cloned];
+      figma.viewport.scrollAndZoomIntoView([cloned]);
+    }
     return { success: true, nodeId: cloned.id, parentNodeId: parent.id };
   } catch (err) {
     if (cloned && "remove" in cloned) { try { cloned.remove(); } catch (_) {} }
