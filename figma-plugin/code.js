@@ -1765,6 +1765,29 @@ async function setVariableValues(params) {
   return { success: true, id: v.id, name: v.name };
 }
 
+async function renameVariable(params) {
+  const variableId = params && params.variableId ? String(params.variableId) : "";
+  const name = params && params.name !== undefined && params.name !== null ? String(params.name) : "";
+  if (!variableId) throw new Error("Missing variableId");
+  if (!name) throw new Error("Missing name");
+  const v = await figma.variables.getVariableByIdAsync(variableId);
+  if (!v) throw new Error("Variable not found: " + variableId);
+  v.name = name;
+  return { success: true, id: v.id, name: v.name };
+}
+
+async function deleteVariable(params) {
+  const variableId = params && params.variableId ? String(params.variableId) : "";
+  const confirmDelete = Boolean(params && params.confirmDelete);
+  if (!variableId) throw new Error("Missing variableId");
+  if (!confirmDelete) throw new Error("confirmDelete must be true");
+  const v = await figma.variables.getVariableByIdAsync(variableId);
+  if (!v) throw new Error("Variable not found: " + variableId);
+  if (typeof v.remove !== "function") throw new Error("Variable.remove() is not available in this Figma environment");
+  v.remove();
+  return { success: true, variableId };
+}
+
 async function importVariableByKey(params) {
   const key = params && params.key ? String(params.key) : "";
   if (!key) throw new Error("Missing key");
@@ -1870,6 +1893,7 @@ const ALLOWED_ACTIONS = new Set([
   "get_instance_slots", "append_to_slot",
   "list_variable_collections", "list_variables",
   "create_variable_collection", "create_variable", "set_variable_values",
+  "rename_variable", "delete_variable",
   "import_variable_by_key",
   "bind_color_variable_to_fill", "bind_color_variable_to_stroke",
   "bind_variable_to_property", "set_node_explicit_variable_mode",
@@ -1883,7 +1907,7 @@ async function handleAction(action, payload) {
   if (!ALLOWED_ACTIONS.has(action)) throw new Error(`Action not allowed: ${action}`);
 
   if (/delete|remove|reset|clear/i.test(String(action))) {
-    if (action !== "delete_node" && action !== "delete_multiple_nodes" && action !== "clear_reactions") {
+    if (action !== "delete_node" && action !== "delete_multiple_nodes" && action !== "delete_variable" && action !== "clear_reactions") {
       throw new Error(`Blocked action: ${action}`);
     }
   }
@@ -1972,6 +1996,8 @@ async function handleAction(action, payload) {
     case "create_variable_collection": return await createVariableCollection(p);
     case "create_variable": return await createVariable(p);
     case "set_variable_values": return await setVariableValues(p);
+    case "rename_variable": return await renameVariable(p);
+    case "delete_variable": return await deleteVariable(p);
     case "import_variable_by_key": return await importVariableByKey(p);
     case "bind_color_variable_to_fill": return await bindColorVariableToFill(p);
     case "bind_color_variable_to_stroke": return await bindColorVariableToStroke(p);
