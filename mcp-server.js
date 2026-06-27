@@ -1,13 +1,129 @@
 import { randomUUID } from "node:crypto";
+import { request as httpsRequest } from "node:https";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, extname, isAbsolute, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { WebSocket, WebSocketServer } from "ws";
 import { z } from "zod";
 
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)));
+
 const wsHost = process.env.FIGMA_BRIDGE_HOST || "127.0.0.1";
 const wsPort = Number(process.env.FIGMA_BRIDGE_PORT || "8787");
 const commandTimeoutMs = Number(process.env.FIGMA_BRIDGE_TIMEOUT_MS || "180000");
 const defaultChannel = process.env.FIGMA_BRIDGE_CHANNEL || "default";
+
+function getFigmaToken() {
+  const token = process.env.FIGMA_TOKEN;
+  return typeof token === "string" ? token.trim() : "";
+}
+
+function requireFigmaToken() {
+  const token = getFigmaToken();
+  if (!token) throw new Error("Missing FIGMA_TOKEN environment variable");
+  return token;
+}
+
+function toQueryString(params) {
+  const sp = new URLSearchParams();
+  for (const [k, v] of Object.entries(params || {})) {
+    if (v === undefined || v === null) continue;
+    sp.set(String(k), String(v));
+  }
+  const qs = sp.toString();
+  return qs ? `?${qs}` : "";
+}
+
+async function httpGetBuffer(url, remainingRedirects = 5) {
+  const u = new URL(url);
+  const options = {
+    method: "GET",
+    protocol: u.protocol,
+    hostname: u.hostname,
+    path: `${u.pathname}${u.search}`,
+    port: u.port ? Number(u.port) : undefined,
+    headers: {
+      "User-Agent": "figma-write-bridge"
+    }
+  };
+
+  return await new Promise((resolvePromise, rejectPromise) => {
+    const req = httpsRequest(options, (res) => {
+      const status = res.statusCode || 0;
+      const location = res.headers.location ? String(res.headers.location) : "";
+      if (status >= 300 && status < 400 && location && remainingRedirects > 0) {
+        res.resume();
+        const nextUrl = location.startsWith("http") ? location : new URL(location, url).toString();
+        httpGetBuffer(nextUrl, remainingRedirects - 1).then(resolvePromise, rejectPromise);
+        return;
+      }
+
+      if (status < 200 || status >= 300) {
+        const chunks = [];
+        res.on("data", (d) => chunks.push(Buffer.from(d)));
+        res.on("end", () => {
+          const body = Buffer.concat(chunks).toString("utf8");
+          rejectPromise(new Error(`HTTP ${status} for ${url}${body ? `: ${body}` : ""}`));
+        });
+        return;
+      }
+
+      const chunks = [];
+      res.on("data", (d) => chunks.push(Buffer.from(d)));
+      res.on("end", () => resolvePromise(Buffer.concat(chunks)));
+    });
+    req.on("error", rejectPromise);
+    req.end();
+  });
+}
+
+async function figmaApiJson(pathname, query) {
+  const token = requireFigmaToken();
+  const urlPath = `${pathname}${toQueryString(query)}`;
+  const options = {
+    method: "GET",
+    hostname: "api.figma.com",
+    path: urlPath,
+    headers: {
+      "X-Figma-Token": token
+    }
+  };
+
+  const body = await new Promise((resolvePromise, rejectPromise) => {
+    const req = httpsRequest(options, (res) => {
+      const status = res.statusCode || 0;
+      const chunks = [];
+      res.on("data", (d) => chunks.push(Buffer.from(d)));
+      res.on("end", () => {
+        const raw = Buffer.concat(chunks).toString("utf8");
+        if (status < 200 || status >= 300) {
+          rejectPromise(new Error(`Figma API HTTP ${status} for ${urlPath}${raw ? `: ${raw}` : ""}`));
+          return;
+        }
+        try {
+          resolvePromise(JSON.parse(raw));
+        } catch {
+          rejectPromise(new Error(`Invalid JSON from Figma API for ${urlPath}`));
+        }
+      });
+    });
+    req.on("error", rejectPromise);
+    req.end();
+  });
+
+  return body;
+}
+
+function resolveSafeOutputDir(localPath) {
+  const raw = typeof localPath === "string" ? localPath.trim() : "";
+  if (!raw) throw new Error("Missing localPath");
+  const abs = isAbsolute(raw) ? resolve(raw) : resolve(repoRoot, raw);
+  const rel = relative(repoRoot, abs);
+  if (rel.startsWith("..") || isAbsolute(rel)) throw new Error("localPath must be inside the figma-write-bridge repo");
+  return abs;
+}
 
 const argv = process.argv.slice(2);
 const standalone = argv.includes("--standalone") || process.env.FIGMA_BRIDGE_STANDALONE === "1";
@@ -300,6 +416,8 @@ const server = new McpServer({
 const ALLOWED_MCP_TOOLS = new Set([
   "figma_bridge_status",
   "join_channel",
+  "get_figma_data",
+  "download_figma_images",
   "set_target_frame",
   "get_target_frames",
   "clear_target_frames",
@@ -358,6 +476,8 @@ const ALLOWED_MCP_TOOLS = new Set([
   "create_variable_collection",
   "create_variable",
   "set_variable_values",
+  "rename_variable",
+  "delete_variable",
   "import_variable_by_key",
   "bind_color_variable_to_fill",
   "bind_color_variable_to_stroke",
@@ -442,6 +562,170 @@ server.registerTool(
             null,
             2
           )
+        }
+      ]
+    };
+  }
+);
+
+server.registerTool(
+  "get_figma_data",
+  {
+    title: "Get Figma data",
+    description: "Get Figma file data via the Figma REST API.",
+    inputSchema: {
+      fileKey: z.string(),
+      nodeId: z.string().optional(),
+      depth: z.number().optional()
+    }
+  },
+  async ({ fileKey, nodeId, depth }) => {
+    const key = String(fileKey || "").trim();
+    if (!key) throw new Error("Missing fileKey");
+    const depthValue = typeof depth === "number" && Number.isFinite(depth) ? depth : undefined;
+
+    const filePromise = figmaApiJson(`/v1/files/${key}`, depthValue !== undefined ? { depth: depthValue } : undefined);
+    const stylesPromise = figmaApiJson(`/v1/files/${key}/styles`, {});
+    const componentsPromise = figmaApiJson(`/v1/files/${key}/components`, {});
+    const componentSetsPromise = figmaApiJson(`/v1/files/${key}/component_sets`, {});
+
+    const nodeIdValue = typeof nodeId === "string" && nodeId.trim() ? nodeId.trim() : "";
+    const nodesPromise = nodeIdValue
+      ? figmaApiJson(
+          `/v1/files/${key}/nodes`,
+          Object.assign({ ids: nodeIdValue }, depthValue !== undefined ? { depth: depthValue } : {})
+        )
+      : Promise.resolve(undefined);
+
+    const [file, nodes, styles, components, componentSets] = await Promise.all([
+      filePromise,
+      nodesPromise,
+      stylesPromise,
+      componentsPromise,
+      componentSetsPromise
+    ]);
+
+    const result = { file, styles, components, componentSets };
+    if (nodes !== undefined) result.nodes = nodes;
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "download_figma_images",
+  {
+    title: "Download Figma images",
+    description: "Download SVG/PNG/GIF images used in a Figma file via the Figma REST API.",
+    inputSchema: {
+      fileKey: z.string(),
+      nodes: z.array(
+        z.object({
+          nodeId: z.string(),
+          imageRef: z.string().optional(),
+          gifRef: z.string().optional(),
+          fileName: z.string(),
+          needsCropping: z.boolean().optional(),
+          cropTransform: z.array(z.array(z.number())).optional(),
+          requiresImageDimensions: z.boolean().optional(),
+          filenameSuffix: z.string().optional()
+        })
+      ),
+      pngScale: z.number().optional(),
+      localPath: z.string()
+    }
+  },
+  async ({ fileKey, nodes, pngScale, localPath }) => {
+    const key = String(fileKey || "").trim();
+    if (!key) throw new Error("Missing fileKey");
+    const outDir = resolveSafeOutputDir(localPath);
+    await mkdir(outDir, { recursive: true });
+
+    const scaleValue =
+      typeof pngScale === "number" && Number.isFinite(pngScale) && pngScale > 0 ? pngScale : 2;
+
+    const imagesIndex = await figmaApiJson(`/v1/files/${key}/images`, {});
+    const imageUrls =
+      (imagesIndex && imagesIndex.meta && imagesIndex.meta.images) ||
+      (imagesIndex && imagesIndex.images) ||
+      {};
+
+    const downloaded = [];
+    const errors = [];
+
+    for (const entry of Array.isArray(nodes) ? nodes : []) {
+      const nodeId = entry && entry.nodeId ? String(entry.nodeId) : "";
+      const fileName = entry && entry.fileName ? String(entry.fileName) : "";
+      if (!nodeId || !fileName) {
+        errors.push({ nodeId, fileName, error: "Missing nodeId/fileName" });
+        continue;
+      }
+
+      const absFilePath = resolve(outDir, fileName);
+      const rel = relative(outDir, absFilePath);
+      if (rel.startsWith("..") || isAbsolute(rel)) {
+        errors.push({ nodeId, fileName, error: "fileName escapes localPath" });
+        continue;
+      }
+
+      const ext = extname(fileName).toLowerCase();
+      let url = "";
+      let method = "";
+
+      try {
+        if (ext === ".gif") {
+          const ref = entry && entry.gifRef ? String(entry.gifRef) : "";
+          url = ref ? String(imageUrls[ref] || "") : "";
+          method = "gifRef";
+          if (!url) throw new Error("Missing gifRef URL");
+        } else if (entry && entry.needsCropping === true) {
+          const exportData = await figmaApiJson(`/v1/images/${key}`, {
+            ids: nodeId,
+            format: "png",
+            scale: scaleValue
+          });
+          url = exportData && exportData.images ? String(exportData.images[nodeId] || "") : "";
+          method = "node-export";
+          if (!url) throw new Error("Missing export URL");
+        } else if (entry && entry.imageRef) {
+          const ref = String(entry.imageRef);
+          url = String(imageUrls[ref] || "");
+          method = "imageRef";
+          if (!url) {
+            const fmt = ext === ".svg" ? "svg" : "png";
+            const exportData = await figmaApiJson(`/v1/images/${key}`, {
+              ids: nodeId,
+              format: fmt,
+              scale: fmt === "png" ? scaleValue : undefined
+            });
+            url = exportData && exportData.images ? String(exportData.images[nodeId] || "") : "";
+            method = "node-export";
+          }
+          if (!url) throw new Error("Missing imageRef/export URL");
+        } else {
+          const fmt = ext === ".svg" ? "svg" : "png";
+          const exportData = await figmaApiJson(`/v1/images/${key}`, {
+            ids: nodeId,
+            format: fmt,
+            scale: fmt === "png" ? scaleValue : undefined
+          });
+          url = exportData && exportData.images ? String(exportData.images[nodeId] || "") : "";
+          method = "node-export";
+          if (!url) throw new Error("Missing export URL");
+        }
+
+        const buf = await httpGetBuffer(url);
+        await writeFile(absFilePath, buf);
+        downloaded.push({ nodeId, fileName, savedPath: absFilePath, url, method });
+      } catch (e) {
+        errors.push({ nodeId, fileName, url, method, error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({ outDir, downloaded, errors }, null, 2)
         }
       ]
     };
@@ -1543,6 +1827,38 @@ server.registerTool(
   },
   async ({ variableId, valuesByMode, valuesByModeEntries }) => {
     const result = await sendCommand("set_variable_values", { variableId, valuesByMode, valuesByModeEntries });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "rename_variable",
+  {
+    title: "Rename variable",
+    description: "Rename an existing variable by variableId.",
+    inputSchema: {
+      variableId: z.string(),
+      name: z.string()
+    }
+  },
+  async ({ variableId, name }) => {
+    const result = await sendCommand("rename_variable", { variableId, name });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "delete_variable",
+  {
+    title: "Delete variable",
+    description: "Delete an existing variable by variableId. Requires confirmDelete=true.",
+    inputSchema: {
+      variableId: z.string(),
+      confirmDelete: z.boolean()
+    }
+  },
+  async ({ variableId, confirmDelete }) => {
+    const result = await sendCommand("delete_variable", { variableId, confirmDelete });
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   }
 );
