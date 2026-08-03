@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { request as httpsRequest } from "node:https";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, extname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -14,6 +14,72 @@ const wsHost = process.env.FIGMA_BRIDGE_HOST || "127.0.0.1";
 const wsPort = Number(process.env.FIGMA_BRIDGE_PORT || "8787");
 const commandTimeoutMs = Number(process.env.FIGMA_BRIDGE_TIMEOUT_MS || "180000");
 const defaultChannel = process.env.FIGMA_BRIDGE_CHANNEL || "default";
+const bridgeSecret = process.env.FIGMA_BRIDGE_SECRET || "";
+const transitionTypeSchema = z.enum(["DISSOLVE", "SMART_ANIMATE", "SCROLL_ANIMATE", "MOVE_IN", "MOVE_OUT", "PUSH", "SLIDE_IN", "SLIDE_OUT"]);
+const directionalTransitionTypeSchema = z.enum(["MOVE_IN", "MOVE_OUT", "PUSH", "SLIDE_IN", "SLIDE_OUT"]);
+const transitionDirectionSchema = z.enum(["LEFT", "RIGHT", "TOP", "BOTTOM"]);
+const easingTypeSchema = z.enum(["EASE_IN", "EASE_OUT", "EASE_IN_AND_OUT", "LINEAR", "EASE_IN_BACK", "EASE_OUT_BACK", "EASE_IN_AND_OUT_BACK", "CUSTOM_CUBIC_BEZIER", "GENTLE", "QUICK", "BOUNCY", "SLOW", "CUSTOM_SPRING"]);
+const motionPresetSchema = z.enum(["subtle", "smooth", "quick", "bouncy", "dissolve", "slide_left", "slide_right"]);
+const componentPropertyTypeSchema = z.enum(["BOOLEAN", "TEXT", "INSTANCE_SWAP", "VARIANT"]);
+const instanceSwapPreferredValueSchema = z.object({
+  type: z.enum(["COMPONENT", "COMPONENT_SET"]),
+  key: z.string()
+});
+
+const easingSchema = z.object({
+  type: easingTypeSchema,
+  easingFunctionCubicBezier: z.object({
+    x1: z.number(),
+    y1: z.number(),
+    x2: z.number(),
+    y2: z.number()
+  }).optional(),
+  easingFunctionSpring: z.object({
+    mass: z.number(),
+    stiffness: z.number(),
+    damping: z.number(),
+    initialVelocity: z.number().optional()
+  }).optional()
+});
+
+const transitionSchema = z.object({
+  type: transitionTypeSchema.optional(),
+  direction: transitionDirectionSchema.optional(),
+  matchLayers: z.boolean().optional(),
+  duration: z.number().nonnegative().optional(),
+  easing: z.union([easingTypeSchema, easingSchema]).optional()
+});
+
+const motionPresetsCatalog = {
+  subtle: {
+    label: "Subtle Smart Animate",
+    transition: { type: "SMART_ANIMATE", duration: 0.24, easing: { type: "GENTLE" } }
+  },
+  smooth: {
+    label: "Smooth Smart Animate",
+    transition: { type: "SMART_ANIMATE", duration: 0.3, easing: { type: "EASE_IN_AND_OUT" } }
+  },
+  quick: {
+    label: "Quick Smart Animate",
+    transition: { type: "SMART_ANIMATE", duration: 0.18, easing: { type: "QUICK" } }
+  },
+  bouncy: {
+    label: "Bouncy Smart Animate",
+    transition: { type: "SMART_ANIMATE", duration: 0.4, easing: { type: "BOUNCY" } }
+  },
+  dissolve: {
+    label: "Dissolve",
+    transition: { type: "DISSOLVE", duration: 0.2, easing: { type: "EASE_OUT" } }
+  },
+  slide_left: {
+    label: "Slide In Left",
+    transition: { type: "SLIDE_IN", direction: "LEFT", matchLayers: false, duration: 0.25, easing: { type: "EASE_OUT" } }
+  },
+  slide_right: {
+    label: "Slide In Right",
+    transition: { type: "SLIDE_IN", direction: "RIGHT", matchLayers: false, duration: 0.25, easing: { type: "EASE_OUT" } }
+  }
+};
 
 function getFigmaToken() {
   const token = process.env.FIGMA_TOKEN;
@@ -79,19 +145,25 @@ async function httpGetBuffer(url, remainingRedirects = 5) {
   });
 }
 
-async function figmaApiJson(pathname, query) {
+async function figmaApiJson(pathname, query, method, body) {
   const token = requireFigmaToken();
   const urlPath = `${pathname}${toQueryString(query)}`;
+  const httpMethod = typeof method === "string" && method.trim() ? String(method).toUpperCase() : "GET";
+  const payload = body !== undefined ? Buffer.from(JSON.stringify(body), "utf8") : undefined;
+  const headers = {
+    "X-Figma-Token": token
+  };
+  if (payload) headers["Content-Type"] = "application/json";
+  if (payload) headers["Content-Length"] = String(payload.length);
+
   const options = {
-    method: "GET",
+    method: httpMethod,
     hostname: "api.figma.com",
     path: urlPath,
-    headers: {
-      "X-Figma-Token": token
-    }
+    headers
   };
 
-  const body = await new Promise((resolvePromise, rejectPromise) => {
+  const bodyOut = await new Promise((resolvePromise, rejectPromise) => {
     const req = httpsRequest(options, (res) => {
       const status = res.statusCode || 0;
       const chunks = [];
@@ -102,6 +174,10 @@ async function figmaApiJson(pathname, query) {
           rejectPromise(new Error(`Figma API HTTP ${status} for ${urlPath}${raw ? `: ${raw}` : ""}`));
           return;
         }
+        if (!raw) {
+          resolvePromise(null);
+          return;
+        }
         try {
           resolvePromise(JSON.parse(raw));
         } catch {
@@ -110,10 +186,11 @@ async function figmaApiJson(pathname, query) {
       });
     });
     req.on("error", rejectPromise);
-    req.end();
+    if (payload) req.end(payload);
+    else req.end();
   });
 
-  return body;
+  return bodyOut;
 }
 
 function resolveSafeOutputDir(localPath) {
@@ -123,6 +200,18 @@ function resolveSafeOutputDir(localPath) {
   const rel = relative(repoRoot, abs);
   if (rel.startsWith("..") || isAbsolute(rel)) throw new Error("localPath must be inside the figma-write-bridge repo");
   return abs;
+}
+
+function resolveInputPath(localPath) {
+  const raw = typeof localPath === "string" ? localPath.trim() : "";
+  if (!raw) throw new Error("Missing localPath");
+  return isAbsolute(raw) ? resolve(raw) : resolve(repoRoot, raw);
+}
+
+async function readLocalFileAsBase64(localPath) {
+  const abs = resolveInputPath(localPath);
+  const buf = await readFile(abs);
+  return buf.toString("base64");
 }
 
 const argv = process.argv.slice(2);
@@ -205,29 +294,109 @@ function getSocketForChannel(channelName) {
   return getActiveSocket();
 }
 
+// Fire-and-forget sync of the server's targetFrameIds into the plugin so the
+// plugin can enforce scope itself. The plugin replies with a result message
+// whose id is not tracked in pending, which the result handler safely ignores.
+function sendTargetFramesSync(socket) {
+  const s = socket || getActiveSocket();
+  if (!isOpenSocket(s)) return;
+  try {
+    s.send(
+      JSON.stringify({
+        type: "command",
+        id: randomUUID(),
+        action: "sync_target_frames",
+        payload: { targetFrameIds: Array.from(targetFrameIds) }
+      })
+    );
+  } catch {}
+}
+
+// ---------------------------------------------------------------------------
+// Change log (backs get_changes_since so the agent can re-read only what it
+// touched instead of the whole document). Lives in this Node process, not the
+// plugin, so it survives plugin UI reloads within the same MCP server session.
+// ---------------------------------------------------------------------------
+
+let changeSeq = 0;
+const CHANGE_LOG_MAX = 500;
+const changeLog = [];
+
+// Push events (selectionchange / documentchange) pushed from the plugin into a
+// ring buffer. Read back with the get_events tool (pass the previous
+// currentSeq as sinceSeq to page forward). Lives in this process, reset on
+// restart — same lifecycle as the change log.
+let eventSeq = 0;
+const EVENT_LOG_MAX = 300;
+const eventLog = [];
+
+function extractChangedIds(result) {
+  if (!result || typeof result !== "object") return [];
+  const ids = new Set();
+  const scalarKeys = [
+    "nodeId", "componentId", "componentSetId", "instanceId", "slotNodeId",
+    "variableId", "collectionId", "pageId", "parentId", "childId"
+  ];
+  for (const k of scalarKeys) if (result[k]) ids.add(String(result[k]));
+  const idArrayKeys = ["nodeIds", "deletedNodeIds", "movedNodeIds", "changedNodeIds"];
+  for (const k of idArrayKeys) {
+    if (Array.isArray(result[k])) for (const v of result[k]) ids.add(String(v));
+  }
+  const objectArrayKeys = ["changes", "nodes", "results"];
+  for (const k of objectArrayKeys) {
+    if (Array.isArray(result[k])) {
+      for (const entry of result[k]) {
+        if (entry && typeof entry === "object" && entry.nodeId) ids.add(String(entry.nodeId));
+      }
+    }
+  }
+  return Array.from(ids);
+}
+
+function recordChange(action, result) {
+  if (action === "run_batch" && result && Array.isArray(result.results)) {
+    for (const item of result.results) {
+      if (!item || !item.success) continue;
+      changeSeq += 1;
+      changeLog.push({ seq: changeSeq, action: item.action, nodeIds: extractChangedIds(item.result), timestamp: Date.now() });
+    }
+  } else {
+    changeSeq += 1;
+    changeLog.push({ seq: changeSeq, action, nodeIds: extractChangedIds(result), timestamp: Date.now() });
+  }
+  if (changeLog.length > CHANGE_LOG_MAX) changeLog.splice(0, changeLog.length - CHANGE_LOG_MAX);
+}
+
+const READ_ONLY_ACTION_RE = /^(ping|get_|list_|scan_|export_|read_)/;
+const NON_MUTATING_ACTIONS = new Set([
+  "create_checkpoint",
+  "subscribe_events",
+  "unsubscribe_events"
+]);
+
 function sendCommand(action, payload, socketOverride) {
   const socket = socketOverride || getActiveSocket();
   if (!socket) {
     throw new Error("Figma plugin not connected");
   }
 
+  const actionName = String(action || "");
   if (!socketOverride) {
-    const actionName = String(action || "");
     if (!actionName) throw new Error("Missing action");
     if (/delete|remove|reset|clear/i.test(actionName)) {
-      if (actionName !== "delete_node" && actionName !== "delete_multiple_nodes") {
+      if (
+        actionName !== "delete_node" &&
+        actionName !== "delete_multiple_nodes" &&
+        actionName !== "delete_component_property" &&
+        actionName !== "delete_component_slot" &&
+        actionName !== "delete_variable" &&
+        actionName !== "clear_reactions" &&
+        actionName !== "delete_page" &&
+        actionName !== "delete_variable_mode"
+      ) {
         throw new Error(`Blocked action: ${actionName}`);
       }
     }
-    if (/^(applySarawakFoundations)$/i.test(actionName)) {
-      throw new Error(`Blocked action: ${actionName}`);
-    }
-
-    const isReadAction =
-      /^(ping|get_|scan_|export_|import_)/.test(actionName) ||
-      /^(getSelection|getDocumentInfo|getDocumentInfo|getNode|getNodeById|scanTree|getStyles|getLocalComponents|get_document_info|get_selection|get_node|get_styles|get_local_components)$/i.test(
-        actionName
-      );
   }
 
   const id = randomUUID();
@@ -244,7 +413,13 @@ function sendCommand(action, payload, socketOverride) {
   });
 
   socket.send(JSON.stringify({ type: "command", id, action, payload }));
-  return promise;
+
+  if (socketOverride || READ_ONLY_ACTION_RE.test(actionName) || NON_MUTATING_ACTIONS.has(actionName)) return promise;
+
+  return promise.then((result) => {
+    recordChange(actionName, result);
+    return result;
+  });
 }
 
 wss.on("error", (err) => {
@@ -266,6 +441,17 @@ wss.on("connection", (socket) => {
 
     if (!msg || typeof msg.type !== "string") return;
 
+    const authRequiredTypes = ["join", "set_active_channel", "control", "status"];
+    if (bridgeSecret && authRequiredTypes.includes(msg.type) && msg.secret !== bridgeSecret) {
+      try {
+        socket.send(JSON.stringify({ type: "system", message: "Unauthorized: missing or invalid FIGMA_BRIDGE_SECRET" }));
+      } catch {}
+      try {
+        socket.close();
+      } catch {}
+      return;
+    }
+
     if (msg.type === "join") {
       const channel = typeof msg.channel === "string" && msg.channel.trim() ? msg.channel.trim() : defaultChannel;
       const prev = socketToChannel.get(socket);
@@ -273,12 +459,17 @@ wss.on("connection", (socket) => {
       socketToChannel.set(socket, channel);
       channels.set(channel, socket);
       markSocketRole(socket, "plugin");
+      const meta = socketMeta.get(socket) || {};
+      meta.fileKey = typeof msg.fileKey === "string" && msg.fileKey ? String(msg.fileKey) : null;
+      meta.fileName = typeof msg.fileName === "string" && msg.fileName ? String(msg.fileName) : null;
+      socketMeta.set(socket, meta);
       clientSockets.delete(socket);
       unclaimedSockets.delete(socket);
       if (!activeChannel) activeChannel = channel;
       try {
         socket.send(JSON.stringify({ type: "system", channel, message: `Joined channel: ${channel}` }));
       } catch {}
+      if (targetFrameIds.size > 0) sendTargetFramesSync(socket);
       return;
     }
 
@@ -339,6 +530,27 @@ wss.on("connection", (socket) => {
           })
         );
       } catch {}
+      return;
+    }
+
+    if (msg.type === "update_target_frames") {
+      const ids = Array.isArray(msg.targetFrameIds) ? msg.targetFrameIds.map(String) : [];
+      targetFrameIds.clear();
+      for (const id of ids) targetFrameIds.add(id);
+      return;
+    }
+
+    if (msg.type === "event") {
+      eventSeq += 1;
+      const name = typeof msg.name === "string" && msg.name ? String(msg.name) : "unknown";
+      eventLog.push({
+        seq: eventSeq,
+        name,
+        channel: typeof msg.channel === "string" ? msg.channel : socketToChannel.get(socket) || null,
+        payload: msg.payload !== undefined ? msg.payload : null,
+        timestamp: Date.now()
+      });
+      if (eventLog.length > EVENT_LOG_MAX) eventLog.splice(0, eventLog.length - EVENT_LOG_MAX);
       return;
     }
 
@@ -423,9 +635,18 @@ const ALLOWED_MCP_TOOLS = new Set([
   "clear_target_frames",
   "rename_node",
   "get_document_info",
+  "get_all_pages",
+  "get_document_tree",
   "get_selection",
   "get_node_info",
   "get_nodes_info",
+  "get_selection_context",
+  "get_changes_since",
+  "run_batch",
+  "create_checkpoint",
+  "restore_checkpoint",
+  "list_checkpoints",
+  "find_and_replace_text",
   "get_instance_source",
   "scan_instances_with_sources",
   "import_component_by_key",
@@ -448,9 +669,25 @@ const ALLOWED_MCP_TOOLS = new Set([
   "apply_grid_style",
   "set_layout_grids",
   "get_local_components",
+  "create_component",
+  "create_component_from_node",
+  "combine_as_variants",
+  "set_variant_properties",
+  "get_component_property_definitions",
+  "add_component_property",
+  "edit_component_property",
+  "delete_component_property",
+  "bind_component_property",
+  "create_component_slot",
+  "edit_component_slot",
+  "delete_component_slot",
   "create_component_instance",
   "export_node_as_image",
   "scan_text_nodes",
+  "scan_nodes_by_types",
+  "get_annotations",
+  "set_annotation",
+  "set_multiple_annotations",
   "create_rectangle",
   "create_frame",
   "create_text",
@@ -469,6 +706,14 @@ const ALLOWED_MCP_TOOLS = new Set([
   "set_reactions",
   "clear_reactions",
   "upsert_reaction",
+  "set_transition_reaction",
+  "set_smart_animate_reaction",
+  "get_animation_presets",
+  "get_overlay_settings",
+  "set_overlay_settings",
+  "get_prototype_settings",
+  "set_prototype_start_node",
+  "set_flow_starting_points",
   "set_overflow_direction",
   "set_fixed_children",
   "list_variable_collections",
@@ -501,7 +746,52 @@ const ALLOWED_MCP_TOOLS = new Set([
   "figma_create_rectangle",
   "figma_create_text",
   "figma_rename_node",
-  "figma_set_solid_fill"
+  "figma_set_solid_fill",
+  "set_image_fill",
+  "set_gradient_fill",
+  "set_effects",
+  "create_vector",
+  "set_vector_paths",
+  "boolean_group",
+  "group_nodes",
+  "ungroup_node",
+  "create_section",
+  "set_text_style",
+  "create_page",
+  "rename_page",
+  "delete_page",
+  "duplicate_page",
+  "set_current_page",
+  "reorder_page",
+  "generate_grid",
+  "bulk_rename",
+  "bulk_update",
+  "replace_all_instances",
+  "set_variable_mode",
+  "create_variable_mode",
+  "rename_variable_mode",
+  "delete_variable_mode",
+  "rename_variable_collection",
+  "subscribe_events",
+  "unsubscribe_events",
+  "get_events",
+  "list_channels",
+  "list_comments",
+  "post_comment",
+  "delete_comment",
+  "export_frames_to_disk",
+  "undo",
+  "redo",
+  "get_style_guide",
+  "get_font_list",
+  "distribute_nodes",
+  "arrange_children",
+  "import_tokens",
+  "export_tokens",
+  "create_typography_scale",
+  "generate_palette",
+  "extract_component_set",
+  "search_components"
 ]);
 
 {
@@ -530,9 +820,7 @@ server.registerTool(
             connectedChannels: Array.from(channels.entries())
               .filter(([, s]) => s && s.readyState === WebSocket.OPEN)
               .map(([name]) => name)
-          },
-          null,
-          2
+          }
         )
       }
     ]
@@ -558,9 +846,7 @@ server.registerTool(
             {
               activeChannel,
               connected: Boolean(getActiveSocket())
-            },
-            null,
-            2
+            }
           )
         }
       ]
@@ -607,7 +893,7 @@ server.registerTool(
 
     const result = { file, styles, components, componentSets };
     if (nodes !== undefined) result.nodes = nodes;
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -715,7 +1001,7 @@ server.registerTool(
 
         const buf = await httpGetBuffer(url);
         await writeFile(absFilePath, buf);
-        downloaded.push({ nodeId, fileName, savedPath: absFilePath, url, method });
+        downloaded.push({ nodeId, fileName, savedPath: absFilePath, method });
       } catch (e) {
         errors.push({ nodeId, fileName, url, method, error: e instanceof Error ? e.message : String(e) });
       }
@@ -725,7 +1011,7 @@ server.registerTool(
       content: [
         {
           type: "text",
-          text: JSON.stringify({ outDir, downloaded, errors }, null, 2)
+          text: JSON.stringify({ outDir, downloaded, errors })
         }
       ]
     };
@@ -744,7 +1030,7 @@ server.registerTool(
   },
   async ({ nodeId, name }) => {
     const result = await sendCommand("renameNode", { nodeId, name });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -769,7 +1055,8 @@ server.registerTool(
     if (!next.length) throw new Error("Missing frameId/frameIds");
     targetFrameIds.clear();
     for (const id of next) targetFrameIds.add(id);
-    return { content: [{ type: "text", text: JSON.stringify({ targetFrameIds: Array.from(targetFrameIds) }, null, 2) }] };
+    sendTargetFramesSync();
+    return { content: [{ type: "text", text: JSON.stringify({ targetFrameIds: Array.from(targetFrameIds), synced: true }) }] };
   }
 );
 
@@ -780,7 +1067,7 @@ server.registerTool(
     description: "Returns the current target frameIds the agent is allowed to modify."
   },
   async () => ({
-    content: [{ type: "text", text: JSON.stringify({ targetFrameIds: Array.from(targetFrameIds) }, null, 2) }]
+    content: [{ type: "text", text: JSON.stringify({ targetFrameIds: Array.from(targetFrameIds) }) }]
   })
 );
 
@@ -792,7 +1079,8 @@ server.registerTool(
   },
   async () => {
     targetFrameIds.clear();
-    return { content: [{ type: "text", text: JSON.stringify({ targetFrameIds: [] }, null, 2) }] };
+    sendTargetFramesSync();
+    return { content: [{ type: "text", text: JSON.stringify({ targetFrameIds: [], synced: true }) }] };
   }
 );
 
@@ -812,7 +1100,38 @@ server.registerTool(
   },
   async () => {
     const result = await sendCommand("get_document_info", {});
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "get_all_pages",
+  {
+    title: "Get all pages",
+    description: "Compact map of every page in the open file: per page id/name/childCount plus its top-level frames (id/name/type/childCount). Use this once to get a full-file overview before targeted reads."
+  },
+  async () => {
+    const result = await sendCommand("get_all_pages", {});
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "get_document_tree",
+  {
+    title: "Get document tree",
+    description: "Compact structural tree of the whole document (or a subtree) for full-context reads. Every node is {id, name, type}; TEXT nodes include characters by default. Options: rootNodeId (default whole file), maxDepth (levels of children to expand), excludeTypes (e.g. [\"VECTOR\"]), fields (extra per-node fields: fills, strokes, absoluteBoundingBox, strokeWeight, cornerRadius, fillStyleId, strokeStyleId, textStyleId, layoutMode, itemSpacing, padding, visible, opacity), includeHidden (default true).",
+    inputSchema: {
+      rootNodeId: z.string().optional(),
+      maxDepth: z.number().int().min(0).optional(),
+      excludeTypes: z.array(z.string()).optional(),
+      fields: z.array(z.string()).optional(),
+      includeHidden: z.boolean().optional()
+    }
+  },
+  async ({ rootNodeId, maxDepth, excludeTypes, fields, includeHidden }) => {
+    const result = await sendCommand("get_document_tree", { rootNodeId, maxDepth, excludeTypes, fields, includeHidden });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -824,7 +1143,7 @@ server.registerTool(
   },
   async () => {
     const result = await sendCommand("get_selection", {});
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -843,7 +1162,7 @@ server.registerTool(
   },
   async ({ name, x, y, width, height }) => {
     const result = await sendCommand("create_rectangle", { name, x, y, width, height });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -862,7 +1181,7 @@ server.registerTool(
   },
   async ({ name, x, y, width, height }) => {
     const result = await sendCommand("create_frame", { name, x, y, width, height });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -881,7 +1200,7 @@ server.registerTool(
   },
   async ({ characters, name, x, y, fontSize }) => {
     const result = await sendCommand("create_text", { characters, name, x, y, fontSize });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -906,7 +1225,7 @@ server.registerTool(
       b,
       opacity
     });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -914,11 +1233,16 @@ server.registerTool(
   "read_my_design",
   {
     title: "Read my design",
-    description: "Get detailed node information about the current selection without parameters."
+    description: "Get detailed node information about the current selection.",
+    inputSchema: {
+      maxDepth: z.number().int().min(0).optional().describe("Limit how many levels of children to return. Omit for the full subtree."),
+      excludeTypes: z.array(z.string()).optional().describe("Node types to skip entirely, e.g. [\"VECTOR\", \"BOOLEAN_OPERATION\"], to cut noise from nested icon/vector artwork."),
+      fields: z.array(z.string()).optional().describe("Only return these top-level fields (plus id/name/type), e.g. [\"fills\"] or [\"characters\"]. Omit for the full field set.")
+    }
   },
-  async () => {
-    const result = await sendCommand("read_my_design", {});
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  async ({ maxDepth, excludeTypes, fields }) => {
+    const result = await sendCommand("read_my_design", { maxDepth, excludeTypes, fields });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -928,12 +1252,15 @@ server.registerTool(
     title: "Get node info",
     description: "Get detailed information about a specific node.",
     inputSchema: {
-      nodeId: z.string()
+      nodeId: z.string(),
+      maxDepth: z.number().int().min(0).optional().describe("Limit how many levels of children to return. Omit for the full subtree."),
+      excludeTypes: z.array(z.string()).optional().describe("Node types to skip entirely, e.g. [\"VECTOR\", \"BOOLEAN_OPERATION\"], to cut noise from nested icon/vector artwork."),
+      fields: z.array(z.string()).optional().describe("Only return these top-level fields (plus id/name/type), e.g. [\"fills\"] or [\"characters\"]. Omit for the full field set.")
     }
   },
-  async ({ nodeId }) => {
-    const result = await sendCommand("get_node_info", { nodeId });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  async ({ nodeId, maxDepth, excludeTypes, fields }) => {
+    const result = await sendCommand("get_node_info", { nodeId, maxDepth, excludeTypes, fields });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -943,12 +1270,50 @@ server.registerTool(
     title: "Get nodes info",
     description: "Get detailed information about multiple nodes by providing an array of node IDs.",
     inputSchema: {
-      nodeIds: z.array(z.string())
+      nodeIds: z.array(z.string()),
+      maxDepth: z.number().int().min(0).optional().describe("Limit how many levels of children to return. Omit for the full subtree."),
+      excludeTypes: z.array(z.string()).optional().describe("Node types to skip entirely, e.g. [\"VECTOR\", \"BOOLEAN_OPERATION\"], to cut noise from nested icon/vector artwork."),
+      fields: z.array(z.string()).optional().describe("Only return these top-level fields (plus id/name/type), e.g. [\"fills\"] or [\"characters\"]. Omit for the full field set.")
     }
   },
-  async ({ nodeIds }) => {
-    const result = await sendCommand("get_nodes_info", { nodeIds });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  async ({ nodeIds, maxDepth, excludeTypes, fields }) => {
+    const result = await sendCommand("get_nodes_info", { nodeIds, maxDepth, excludeTypes, fields });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "get_selection_context",
+  {
+    title: "Get selection context",
+    description: "One-call bundle for the current selection: node info plus, for instances, main component id, component property definitions, current property values, and slots. Replaces the get_selection -> get_node_info -> get_component_property_definitions round-trip chain.",
+    inputSchema: {
+      maxDepth: z.number().int().min(0).optional().describe("Limit how many levels of children to return per node. Defaults to 0 (the node itself only)."),
+      excludeTypes: z.array(z.string()).optional(),
+      fields: z.array(z.string()).optional().describe("Only return these top-level fields (plus id/name/type) in each node's info.")
+    }
+  },
+  async ({ maxDepth, excludeTypes, fields }) => {
+    const result = await sendCommand("get_selection_context", { maxDepth, excludeTypes, fields });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "get_changes_since",
+  {
+    title: "Get changes since",
+    description: "Returns which nodes this bridge has mutated since a given sequence cursor, so the agent can re-read only what changed instead of the whole document. Pass the previous call's currentSeq back as sinceSeq to page forward. Cursor state lives in the MCP server process and resets when it restarts.",
+    inputSchema: {
+      sinceSeq: z.number().int().min(0).optional()
+    }
+  },
+  async ({ sinceSeq }) => {
+    const since = Number(sinceSeq) || 0;
+    const entries = changeLog.filter((c) => c.seq > since);
+    const changedNodeIds = Array.from(new Set(entries.flatMap((c) => c.nodeIds)));
+    const result = { currentSeq: changeSeq, sinceSeq: since, changeCount: entries.length, changedNodeIds, changes: entries };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -963,7 +1328,7 @@ server.registerTool(
   },
   async ({ instanceId }) => {
     const result = await sendCommand("get_instance_source", { instanceId });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -980,7 +1345,7 @@ server.registerTool(
   },
   async ({ rootNodeId, chunkSize, offset }) => {
     const result = await sendCommand("scan_instances_with_sources", { rootNodeId, chunkSize, offset });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -995,7 +1360,7 @@ server.registerTool(
   },
   async ({ componentKey }) => {
     const result = await sendCommand("import_component_by_key", { componentKey });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1010,7 +1375,7 @@ server.registerTool(
   },
   async ({ componentSetKey }) => {
     const result = await sendCommand("import_component_set_by_key", { componentSetKey });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1028,7 +1393,7 @@ server.registerTool(
   },
   async ({ componentKey, parentNodeId, x, y }) => {
     const result = await sendCommand("create_instance_from_component_key", { componentKey, parentNodeId, x, y });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1046,7 +1411,7 @@ server.registerTool(
   },
   async ({ componentSetKey, parentNodeId, x, y }) => {
     const result = await sendCommand("create_instance_from_component_set_key", { componentSetKey, parentNodeId, x, y });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1061,7 +1426,7 @@ server.registerTool(
   },
   async ({ instanceId }) => {
     const result = await sendCommand("get_instance_properties", { instanceId });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1077,7 +1442,7 @@ server.registerTool(
   },
   async ({ instanceId, properties }) => {
     const result = await sendCommand("set_instance_properties", { instanceId, properties });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1093,7 +1458,7 @@ server.registerTool(
   },
   async ({ instanceId, newComponentKey }) => {
     const result = await sendCommand("swap_instance_component", { instanceId, newComponentKey });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1108,7 +1473,7 @@ server.registerTool(
   },
   async ({ nodeId }) => {
     const result = await sendCommand("set_focus", { nodeId });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1123,7 +1488,7 @@ server.registerTool(
   },
   async ({ nodeIds }) => {
     const result = await sendCommand("set_selections", { nodeIds });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1143,7 +1508,7 @@ server.registerTool(
   },
   async ({ nodeId, r, g, b, opacity, strokeWeight }) => {
     const result = await sendCommand("set_stroke_color", { nodeId, r, g, b, opacity, strokeWeight });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1160,7 +1525,7 @@ server.registerTool(
   },
   async ({ nodeId, x, y }) => {
     const result = await sendCommand("move_node", { nodeId, x, y });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1177,7 +1542,7 @@ server.registerTool(
   },
   async ({ nodeId, width, height }) => {
     const result = await sendCommand("resize_node", { nodeId, width, height });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1194,7 +1559,7 @@ server.registerTool(
   },
   async ({ nodeId, dx, dy }) => {
     const result = await sendCommand("clone_node", { nodeId, dx, dy });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1212,7 +1577,7 @@ server.registerTool(
   },
   async ({ nodeId, parentNodeId, dx, dy }) => {
     const result = await sendCommand("clone_node_into_parent", { nodeId, parentNodeId, dx, dy });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1227,7 +1592,7 @@ server.registerTool(
   },
   async ({ nodeId }) => {
     const result = await sendCommand("delete_node", { nodeId });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1242,7 +1607,72 @@ server.registerTool(
   },
   async ({ nodeIds }) => {
     const result = await sendCommand("delete_multiple_nodes", { nodeIds });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "run_batch",
+  {
+    title: "Run batch",
+    description: "Execute multiple bridge actions in one round trip instead of one WebSocket call per action. Runs sequentially inside the plugin; by default stops at the first error (partial results are still returned in order). This is NOT a transaction: steps that already succeeded are not rolled back if a later step fails. Use create_checkpoint first if you need a rollback path for the nodes you're about to batch-edit.",
+    inputSchema: {
+      actions: z.array(
+        z.object({
+          action: z.string().describe("Any other bridge action name, e.g. \"set_fill_color\"."),
+          payload: z.any().optional()
+        })
+      ),
+      stopOnError: z.boolean().optional().describe("Default true: stop at the first failing step. Set false to run every step regardless of earlier failures.")
+    }
+  },
+  async ({ actions, stopOnError }) => {
+    const result = await sendCommand("run_batch", { actions, stopOnError });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "create_checkpoint",
+  {
+    title: "Create checkpoint",
+    description: "Snapshot a handful of common mutable properties (position, size, rotation, opacity, visibility, fills, strokes, corner radius, text characters) on the given nodes so they can be restored later with restore_checkpoint. NOT true undo: it cannot restore a deleted node or undo structural changes (reparenting, new/removed children), and state is lost if the Figma plugin UI reloads.",
+    inputSchema: {
+      nodeIds: z.array(z.string()),
+      label: z.string().optional()
+    }
+  },
+  async ({ nodeIds, label }) => {
+    const result = await sendCommand("create_checkpoint", { nodeIds, label });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "restore_checkpoint",
+  {
+    title: "Restore checkpoint",
+    description: "Reapply a snapshot captured by create_checkpoint to whichever of its nodes still exist. See create_checkpoint for what is and isn't covered.",
+    inputSchema: {
+      checkpointId: z.string()
+    }
+  },
+  async ({ checkpointId }) => {
+    const result = await sendCommand("restore_checkpoint", { checkpointId });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "list_checkpoints",
+  {
+    title: "List checkpoints",
+    description: "List checkpoints captured so far in this plugin session.",
+    inputSchema: {}
+  },
+  async () => {
+    const result = await sendCommand("list_checkpoints", {});
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1266,7 +1696,7 @@ server.registerTool(
   },
   async ({ nodeId, radius, corners }) => {
     const result = await sendCommand("set_corner_radius", { nodeId, radius, corners });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1282,7 +1712,7 @@ server.registerTool(
   },
   async ({ nodeId, characters }) => {
     const result = await sendCommand("set_text_content", { nodeId, characters });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1299,7 +1729,38 @@ server.registerTool(
   },
   async ({ rootNodeId, chunkSize, offset }) => {
     const result = await sendCommand("scan_text_nodes", { rootNodeId, chunkSize, offset });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "find_and_replace_text",
+  {
+    title: "Find and replace text",
+    description: "Search TEXT node characters for a literal string or regex and replace matches, optionally across every page in the file (not just the current one). Pass dryRun: true first to preview matches before committing.",
+    inputSchema: {
+      query: z.string(),
+      replacement: z.string(),
+      useRegex: z.boolean().optional(),
+      matchCase: z.boolean().optional(),
+      wholeWord: z.boolean().optional().describe("Ignored when useRegex is true."),
+      allPages: z.boolean().optional().describe("Default false: only search the current page."),
+      rootNodeId: z.string().optional().describe("Restrict the search to this node's subtree on the current page. Ignored on other pages when allPages is true."),
+      dryRun: z.boolean().optional().describe("Preview matches without writing changes.")
+    }
+  },
+  async ({ query, replacement, useRegex, matchCase, wholeWord, allPages, rootNodeId, dryRun }) => {
+    const result = await sendCommand("find_and_replace_text", {
+      query,
+      replacement,
+      useRegex,
+      matchCase,
+      wholeWord,
+      allPages,
+      rootNodeId,
+      dryRun
+    });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1319,7 +1780,7 @@ server.registerTool(
   },
   async ({ updates }) => {
     const result = await sendCommand("set_multiple_text_contents", { updates });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1331,7 +1792,7 @@ server.registerTool(
   },
   async () => {
     const result = await sendCommand("get_styles", {});
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1348,7 +1809,7 @@ server.registerTool(
   },
   async ({ name, hex, paints }) => {
     const result = await sendCommand("create_paint_style", { name, hex, paints });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1373,7 +1834,7 @@ server.registerTool(
   },
   async (args) => {
     const result = await sendCommand("create_text_style", args);
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1389,7 +1850,7 @@ server.registerTool(
   },
   async ({ name, effects }) => {
     const result = await sendCommand("create_effect_style", { name, effects });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1405,7 +1866,7 @@ server.registerTool(
   },
   async ({ name, layoutGrids }) => {
     const result = await sendCommand("create_grid_style", { name, layoutGrids });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1420,7 +1881,7 @@ server.registerTool(
   },
   async ({ key }) => {
     const result = await sendCommand("import_style_by_key", { key });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1436,7 +1897,7 @@ server.registerTool(
   },
   async ({ nodeId, styleId }) => {
     const result = await sendCommand("apply_fill_style", { nodeId, styleId });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1452,7 +1913,7 @@ server.registerTool(
   },
   async ({ nodeId, styleId }) => {
     const result = await sendCommand("apply_stroke_style", { nodeId, styleId });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1468,7 +1929,7 @@ server.registerTool(
   },
   async ({ nodeId, styleId }) => {
     const result = await sendCommand("apply_text_style", { nodeId, styleId });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1484,7 +1945,7 @@ server.registerTool(
   },
   async ({ nodeId, styleId }) => {
     const result = await sendCommand("apply_effect_style", { nodeId, styleId });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1500,7 +1961,7 @@ server.registerTool(
   },
   async ({ nodeId, styleId }) => {
     const result = await sendCommand("apply_grid_style", { nodeId, styleId });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1516,7 +1977,7 @@ server.registerTool(
   },
   async ({ frameId, layoutGrids }) => {
     const result = await sendCommand("set_layout_grids", { frameId, layoutGrids });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1524,14 +1985,301 @@ server.registerTool(
   "get_local_components",
   {
     title: "Get local components",
-    description: "Get information about local components.",
+    description: "Get information about local components, including id, name, type, description, publish key, and simplified component property definitions (for building library catalogs).",
     inputSchema: {
       includeComponentSets: z.boolean().optional()
     }
   },
   async ({ includeComponentSets }) => {
     const result = await sendCommand("get_local_components", { includeComponentSets });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "create_component",
+  {
+    title: "Create component",
+    description: "Create a new empty component node.",
+    inputSchema: {
+      name: z.string().optional(),
+      parentNodeId: z.string().optional(),
+      x: z.number().optional(),
+      y: z.number().optional(),
+      width: z.number().optional(),
+      height: z.number().optional()
+    }
+  },
+  async ({ name, parentNodeId, x, y, width, height }) => {
+    const result = await sendCommand("create_component", { name, parentNodeId, x, y, width, height });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "create_component_from_node",
+  {
+    title: "Create component from node",
+    description: "Convert an existing node into a main component.",
+    inputSchema: {
+      nodeId: z.string(),
+      name: z.string().optional()
+    }
+  },
+  async ({ nodeId, name }) => {
+    const result = await sendCommand("create_component_from_node", { nodeId, name });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "combine_as_variants",
+  {
+    title: "Combine as variants",
+    description: "Combine existing component nodes into a component set and lay them out to avoid overlap.",
+    inputSchema: {
+      componentIds: z.array(z.string()),
+      parentNodeId: z.string().optional(),
+      index: z.number().optional(),
+      name: z.string().optional(),
+      gap: z.number().optional(),
+      gapX: z.number().optional(),
+      gapY: z.number().optional(),
+      columns: z.number().optional()
+    }
+  },
+  async ({ componentIds, parentNodeId, index, name, gap, gapX, gapY, columns }) => {
+    const result = await sendCommand("combine_as_variants", {
+      componentIds,
+      parentNodeId,
+      index,
+      name,
+      gap,
+      gapX,
+      gapY,
+      columns
+    });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "set_variant_properties",
+  {
+    title: "Set variant properties",
+    description: "Rename a component using Figma's variant naming format (Property=Value, ...).",
+    inputSchema: {
+      componentId: z.string().optional(),
+      nodeId: z.string().optional(),
+      properties: z.record(z.string())
+    }
+  },
+  async ({ componentId, nodeId, properties }) => {
+    const result = await sendCommand("set_variant_properties", { componentId, nodeId, properties });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "get_component_property_definitions",
+  {
+    title: "Get component property definitions",
+    description: "Inspect component or component-set property definitions for authoring and verification.",
+    inputSchema: {
+      componentId: z.string().optional(),
+      componentSetId: z.string().optional(),
+      nodeId: z.string().optional(),
+      preferComponentSet: z.boolean().optional()
+    }
+  },
+  async ({ componentId, componentSetId, nodeId, preferComponentSet }) => {
+    const result = await sendCommand("get_component_property_definitions", {
+      componentId,
+      componentSetId,
+      nodeId,
+      preferComponentSet
+    });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "add_component_property",
+  {
+    title: "Add component property",
+    description: "Add a BOOLEAN, TEXT, INSTANCE_SWAP, or VARIANT property to a component or component set.",
+    inputSchema: {
+      componentId: z.string().optional(),
+      componentSetId: z.string().optional(),
+      nodeId: z.string().optional(),
+      preferComponentSet: z.boolean().optional(),
+      name: z.string(),
+      type: componentPropertyTypeSchema,
+      defaultValue: z.union([z.string(), z.boolean()]).optional(),
+      preferredValues: z.array(instanceSwapPreferredValueSchema).optional()
+    }
+  },
+  async ({ componentId, componentSetId, nodeId, preferComponentSet, name, type, defaultValue, preferredValues }) => {
+    const result = await sendCommand("add_component_property", {
+      componentId,
+      componentSetId,
+      nodeId,
+      preferComponentSet,
+      name,
+      type,
+      defaultValue,
+      preferredValues
+    });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "edit_component_property",
+  {
+    title: "Edit component property",
+    description: "Rename or update the default value/preferred values of an existing component property.",
+    inputSchema: {
+      componentId: z.string().optional(),
+      componentSetId: z.string().optional(),
+      nodeId: z.string().optional(),
+      preferComponentSet: z.boolean().optional(),
+      propertyName: z.string(),
+      updates: z.object({
+        name: z.string().optional(),
+        defaultValue: z.union([z.string(), z.boolean()]).optional(),
+        preferredValues: z.array(instanceSwapPreferredValueSchema).optional()
+      })
+    }
+  },
+  async ({ componentId, componentSetId, nodeId, preferComponentSet, propertyName, updates }) => {
+    const result = await sendCommand("edit_component_property", {
+      componentId,
+      componentSetId,
+      nodeId,
+      preferComponentSet,
+      propertyName,
+      updates
+    });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "delete_component_property",
+  {
+    title: "Delete component property",
+    description: "Delete an existing component property from a component or component set.",
+    inputSchema: {
+      componentId: z.string().optional(),
+      componentSetId: z.string().optional(),
+      nodeId: z.string().optional(),
+      preferComponentSet: z.boolean().optional(),
+      propertyName: z.string()
+    }
+  },
+  async ({ componentId, componentSetId, nodeId, preferComponentSet, propertyName }) => {
+    const result = await sendCommand("delete_component_property", {
+      componentId,
+      componentSetId,
+      nodeId,
+      preferComponentSet,
+      propertyName
+    });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "bind_component_property",
+  {
+    title: "Bind component property",
+    description: "Bind a BOOLEAN/TEXT/INSTANCE_SWAP property to a node field using componentPropertyReferences.",
+    inputSchema: {
+      nodeId: z.string(),
+      propertyName: z.string().nullable().optional(),
+      propertyOwnerId: z.string().optional(),
+      field: z.enum(["visible", "characters", "mainComponent"]),
+      unbind: z.boolean().optional()
+    }
+  },
+  async ({ nodeId, propertyName, propertyOwnerId, field, unbind }) => {
+    const result = await sendCommand("bind_component_property", {
+      nodeId,
+      propertyName,
+      propertyOwnerId,
+      field,
+      unbind
+    });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "create_component_slot",
+  {
+    title: "Create component slot",
+    description: "Create a slot inside a component variant. This also creates the corresponding SLOT property.",
+    inputSchema: {
+      componentId: z.string().optional(),
+      componentSetId: z.string().optional(),
+      nodeId: z.string().optional(),
+      variantComponentId: z.string().optional(),
+      name: z.string().optional(),
+      x: z.number().optional(),
+      y: z.number().optional(),
+      width: z.number().optional(),
+      height: z.number().optional()
+    }
+  },
+  async ({ componentId, componentSetId, nodeId, variantComponentId, name, x, y, width, height }) => {
+    const result = await sendCommand("create_component_slot", {
+      componentId,
+      componentSetId,
+      nodeId,
+      variantComponentId,
+      name,
+      x,
+      y,
+      width,
+      height
+    });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "edit_component_slot",
+  {
+    title: "Edit component slot",
+    description: "Rename, resize, or reposition an existing SLOT node inside a component. Figma keeps the SLOT property's name in sync with the slot node's name.",
+    inputSchema: {
+      slotNodeId: z.string(),
+      name: z.string().optional(),
+      x: z.number().optional(),
+      y: z.number().optional(),
+      width: z.number().optional(),
+      height: z.number().optional()
+    }
+  },
+  async ({ slotNodeId, name, x, y, width, height }) => {
+    const result = await sendCommand("edit_component_slot", { slotNodeId, name, x, y, width, height });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "delete_component_slot",
+  {
+    title: "Delete component slot",
+    description: "Remove a SLOT node from a component and delete its corresponding SLOT property. Any content placed in instances of that slot is discarded.",
+    inputSchema: {
+      slotNodeId: z.string()
+    }
+  },
+  async ({ slotNodeId }) => {
+    const result = await sendCommand("delete_component_slot", { slotNodeId });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1548,7 +2296,7 @@ server.registerTool(
   },
   async ({ componentId, x, y }) => {
     const result = await sendCommand("create_component_instance", { componentId, x, y });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1556,16 +2304,25 @@ server.registerTool(
   "export_node_as_image",
   {
     title: "Export node as image",
-    description: "Export a node as an image (PNG, JPG, SVG, or PDF) - returns base64.",
+    description: "Export a node as an image (PNG, JPG, SVG, or PDF). Returns base64, or writes the bytes to a file when localPath is given (kept inside the figma-write-bridge repo).",
     inputSchema: {
       nodeId: z.string(),
       format: z.string().optional(),
-      scale: z.number().optional()
+      scale: z.number().optional(),
+      localPath: z.string().optional()
     }
   },
-  async ({ nodeId, format, scale }) => {
+  async ({ nodeId, format, scale, localPath }) => {
     const result = await sendCommand("export_node_as_image", { nodeId, format, scale });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    if (typeof localPath === "string" && localPath.trim()) {
+      const absFilePath = resolveSafeOutputDir(localPath);
+      await mkdir(dirname(absFilePath), { recursive: true });
+      const base64 = result && typeof result.base64 === "string" ? result.base64 : "";
+      if (!base64) throw new Error("Export returned no base64 to write to disk");
+      await writeFile(absFilePath, Buffer.from(base64, "base64"));
+      return { content: [{ type: "text", text: JSON.stringify({ nodeId: result.nodeId, format: result.format, scale: result.scale, bytesLength: result.bytesLength, savedPath: absFilePath }) }] };
+    }
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1580,7 +2337,7 @@ server.registerTool(
   },
   async ({ types }) => {
     const result = await sendCommand("scan_nodes_by_types", { types });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1596,7 +2353,7 @@ server.registerTool(
   },
   async ({ nodeId, includeCategories }) => {
     const result = await sendCommand("get_annotations", { nodeId, includeCategories });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1614,7 +2371,7 @@ server.registerTool(
   },
   async ({ nodeId, labelMarkdown, categoryId, properties }) => {
     const result = await sendCommand("set_annotation", { nodeId, labelMarkdown, categoryId, properties });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1636,7 +2393,7 @@ server.registerTool(
   },
   async ({ annotations }) => {
     const result = await sendCommand("set_multiple_annotations", { annotations });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1651,7 +2408,7 @@ server.registerTool(
   },
   async ({ nodeIds }) => {
     const result = await sendCommand("get_reactions", { nodeIds });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1667,7 +2424,7 @@ server.registerTool(
   },
   async ({ nodeId, reactions }) => {
     const result = await sendCommand("set_reactions", { nodeId, reactions });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1682,7 +2439,7 @@ server.registerTool(
   },
   async ({ nodeId }) => {
     const result = await sendCommand("clear_reactions", { nodeId });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1705,7 +2462,203 @@ server.registerTool(
   },
   async ({ nodeId, match, reaction }) => {
     const result = await sendCommand("upsert_reaction", { nodeId, match, reaction });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "get_animation_presets",
+  {
+    title: "Get animation presets",
+    description: "List curated motion presets plus the official Figma transition and easing values supported by this bridge.",
+    inputSchema: {}
+  },
+  async () => {
+    const result = {
+      presets: motionPresetsCatalog,
+      transitionTypes: transitionTypeSchema.options,
+      directionalTransitionTypes: directionalTransitionTypeSchema.options,
+      directions: transitionDirectionSchema.options,
+      easingTypes: easingTypeSchema.options,
+      notes: {
+        durationUnit: "seconds",
+        scope: "Prototype transitions, Smart Animate, multi-action reactions, and overlay/flow settings via Figma reactions.",
+        limitation: "Smart Animate itself has no scriptable per-property keyframe/timeline API in Figma's Plugin API — it always auto-interpolates between the two frames/variants based on duration+easing. There is nothing to add here beyond the reaction/transition config this bridge already exposes."
+      }
+    };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "set_transition_reaction",
+  {
+    title: "Set transition reaction",
+    description: "Create or replace a node-to-node prototype reaction with a typed transition/easing payload.",
+    inputSchema: {
+      nodeId: z.string(),
+      destinationId: z.string(),
+      triggerType: z.string().optional(),
+      navigation: z.enum(["NAVIGATE", "SWAP", "OVERLAY", "SCROLL_TO", "CHANGE_TO"]).optional(),
+      preset: motionPresetSchema.optional(),
+      transition: transitionSchema.optional(),
+      replaceExisting: z.boolean().optional(),
+      preserveScrollPosition: z.boolean().optional(),
+      resetVideoPosition: z.boolean().optional(),
+      resetScrollPosition: z.boolean().optional(),
+      resetInteractiveComponents: z.boolean().optional(),
+      overlayRelativePosition: z.object({
+        x: z.number(),
+        y: z.number()
+      }).optional(),
+      match: z.object({
+        triggerType: z.string().optional(),
+        actionType: z.string().optional(),
+        destinationId: z.string().optional()
+      }).optional()
+    }
+  },
+  async (args) => {
+    const result = await sendCommand("set_transition_reaction", args);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "set_smart_animate_reaction",
+  {
+    title: "Set smart animate reaction",
+    description: "Create or replace a node-to-node prototype reaction using Smart Animate with optional easing/preset overrides.",
+    inputSchema: {
+      nodeId: z.string(),
+      destinationId: z.string(),
+      triggerType: z.string().optional(),
+      navigation: z.enum(["NAVIGATE", "SWAP", "OVERLAY", "SCROLL_TO", "CHANGE_TO"]).optional(),
+      preset: motionPresetSchema.optional(),
+      transition: z.object({
+        duration: z.number().nonnegative().optional(),
+        easing: z.union([easingTypeSchema, easingSchema]).optional(),
+        matchLayers: z.boolean().optional(),
+        direction: transitionDirectionSchema.optional()
+      }).optional(),
+      replaceExisting: z.boolean().optional(),
+      preserveScrollPosition: z.boolean().optional(),
+      resetVideoPosition: z.boolean().optional(),
+      resetScrollPosition: z.boolean().optional(),
+      resetInteractiveComponents: z.boolean().optional(),
+      overlayRelativePosition: z.object({
+        x: z.number(),
+        y: z.number()
+      }).optional(),
+      match: z.object({
+        triggerType: z.string().optional(),
+        actionType: z.string().optional(),
+        destinationId: z.string().optional()
+      }).optional()
+    }
+  },
+  async (args) => {
+    const result = await sendCommand("set_smart_animate_reaction", args);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "get_overlay_settings",
+  {
+    title: "Get overlay settings",
+    description: "Read a frame/component's overlay prototype settings (position type, background, click-outside behavior). Used with NODE reactions whose navigation is OVERLAY.",
+    inputSchema: {
+      nodeId: z.string()
+    }
+  },
+  async ({ nodeId }) => {
+    const result = await sendCommand("get_overlay_settings", { nodeId });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "set_overlay_settings",
+  {
+    title: "Set overlay settings",
+    description: "Configure how a frame/component behaves when it is shown as an OVERLAY: where it's anchored, its scrim background, and whether clicking outside closes it.",
+    inputSchema: {
+      nodeId: z.string(),
+      overlayPositionType: z.enum(["CENTER", "TOP_LEFT", "TOP_CENTER", "TOP_RIGHT", "BOTTOM_LEFT", "BOTTOM_CENTER", "BOTTOM_RIGHT", "MANUAL"]).optional(),
+      overlayBackgroundInteraction: z.enum(["NONE", "CLOSE_ON_CLICK_OUTSIDE"]).optional(),
+      overlayBackground: z
+        .union([
+          z.object({ type: z.literal("NONE") }),
+          z.object({
+            type: z.literal("SOLID_COLOR"),
+            color: z.object({
+              r: z.number(),
+              g: z.number(),
+              b: z.number(),
+              a: z.number().optional()
+            })
+          })
+        ])
+        .optional()
+    }
+  },
+  async ({ nodeId, overlayPositionType, overlayBackgroundInteraction, overlayBackground }) => {
+    const result = await sendCommand("set_overlay_settings", {
+      nodeId,
+      overlayPositionType,
+      overlayBackgroundInteraction,
+      overlayBackground
+    });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "get_prototype_settings",
+  {
+    title: "Get prototype settings",
+    description: "Get the current page's prototype start node and Flows starting points.",
+    inputSchema: {}
+  },
+  async () => {
+    const result = await sendCommand("get_prototype_settings", {});
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "set_prototype_start_node",
+  {
+    title: "Set prototype start node",
+    description: "Set (or clear, by omitting nodeId) the current page's default prototype start frame — the entry point used by Present.",
+    inputSchema: {
+      nodeId: z.string().nullable().optional()
+    }
+  },
+  async ({ nodeId }) => {
+    const result = await sendCommand("set_prototype_start_node", { nodeId });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "set_flow_starting_points",
+  {
+    title: "Set flow starting points",
+    description: "Replace the current page's Flows list (named prototype entry points), each pointing at a top-level FRAME.",
+    inputSchema: {
+      flowStartingPoints: z.array(
+        z.object({
+          nodeId: z.string(),
+          name: z.string().optional()
+        })
+      )
+    }
+  },
+  async ({ flowStartingPoints }) => {
+    const result = await sendCommand("set_flow_starting_points", { flowStartingPoints });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1721,7 +2674,7 @@ server.registerTool(
   },
   async ({ frameId, overflowDirection }) => {
     const result = await sendCommand("set_overflow_direction", { frameId, overflowDirection });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1737,7 +2690,7 @@ server.registerTool(
   },
   async ({ frameId, fixedChildIds }) => {
     const result = await sendCommand("set_fixed_children", { frameId, fixedChildIds });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1750,7 +2703,7 @@ server.registerTool(
   },
   async () => {
     const result = await sendCommand("list_variable_collections", {});
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1765,7 +2718,7 @@ server.registerTool(
   },
   async ({ resolvedType }) => {
     const result = await sendCommand("list_variables", { resolvedType });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1781,7 +2734,7 @@ server.registerTool(
   },
   async ({ name, modes }) => {
     const result = await sendCommand("create_variable_collection", { name, modes });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1810,7 +2763,7 @@ server.registerTool(
       valuesByMode,
       valuesByModeEntries
     });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1827,7 +2780,7 @@ server.registerTool(
   },
   async ({ variableId, valuesByMode, valuesByModeEntries }) => {
     const result = await sendCommand("set_variable_values", { variableId, valuesByMode, valuesByModeEntries });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1843,7 +2796,7 @@ server.registerTool(
   },
   async ({ variableId, name }) => {
     const result = await sendCommand("rename_variable", { variableId, name });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1859,7 +2812,7 @@ server.registerTool(
   },
   async ({ variableId, confirmDelete }) => {
     const result = await sendCommand("delete_variable", { variableId, confirmDelete });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1874,7 +2827,7 @@ server.registerTool(
   },
   async ({ key }) => {
     const result = await sendCommand("import_variable_by_key", { key });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1891,7 +2844,7 @@ server.registerTool(
   },
   async ({ nodeId, variableId, paintIndex }) => {
     const result = await sendCommand("bind_color_variable_to_fill", { nodeId, variableId, paintIndex });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1908,7 +2861,7 @@ server.registerTool(
   },
   async ({ nodeId, variableId, paintIndex }) => {
     const result = await sendCommand("bind_color_variable_to_stroke", { nodeId, variableId, paintIndex });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1925,7 +2878,7 @@ server.registerTool(
   },
   async ({ nodeId, property, variableId }) => {
     const result = await sendCommand("bind_variable_to_property", { nodeId, property, variableId });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1942,7 +2895,7 @@ server.registerTool(
   },
   async ({ nodeId, collectionId, modeId }) => {
     const result = await sendCommand("set_node_explicit_variable_mode", { nodeId, collectionId, modeId });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1957,7 +2910,7 @@ server.registerTool(
   },
   async ({ instanceId }) => {
     const result = await sendCommand("get_instance_slots", { instanceId });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -1973,7 +2926,7 @@ server.registerTool(
   },
   async ({ slotNodeId, nodeIds }) => {
     const result = await sendCommand("append_to_slot", { slotNodeId, nodeIds });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -2016,7 +2969,7 @@ server.registerTool(
       padding,
       sizing
     });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -2033,7 +2986,7 @@ server.registerTool(
   },
   async ({ nodeId, layoutMode, layoutWrap }) => {
     const result = await sendCommand("set_layout_mode", { nodeId, layoutMode, layoutWrap });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -2052,7 +3005,7 @@ server.registerTool(
   },
   async ({ nodeId, top, right, bottom, left }) => {
     const result = await sendCommand("set_padding", { nodeId, top, right, bottom, left });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -2069,7 +3022,7 @@ server.registerTool(
   },
   async ({ nodeId, primaryAxisAlignItems, counterAxisAlignItems }) => {
     const result = await sendCommand("set_axis_align", { nodeId, primaryAxisAlignItems, counterAxisAlignItems });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -2094,7 +3047,7 @@ server.registerTool(
       layoutSizingHorizontal,
       layoutSizingVertical
     });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -2110,63 +3063,7 @@ server.registerTool(
   },
   async ({ nodeId, itemSpacing }) => {
     const result = await sendCommand("set_item_spacing", { nodeId, itemSpacing });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-  }
-);
-
-server.registerTool(
-  "add_renewal_info_panel",
-  {
-    title: "Add renewal info panel",
-    description:
-      "Adds a right-side container that shows renewal info (expiry date, times renewed, max renewals) into/within the specified target frame.",
-    inputSchema: {
-      targetNodeId: z.string(),
-      expiryDate: z.string().optional(),
-      timesRenewed: z.number().optional(),
-      maxRenewals: z.number().optional(),
-      title: z.string().optional()
-    }
-  },
-  async ({ targetNodeId, expiryDate, timesRenewed, maxRenewals, title }) => {
-    const result = await sendCommand("add_renewal_info_panel", {
-      targetNodeId,
-      expiryDate,
-      timesRenewed,
-      maxRenewals,
-      title
-    });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-  }
-);
-
-server.registerTool(
-  "create_renewal_tab_screen",
-  {
-    title: "Create renewal tab screen",
-    description:
-      "Clones an existing screen/frame, places it below the source, and updates it to represent the Renewal tab (including an optional renewal info panel).",
-    inputSchema: {
-      url: z.string().optional(),
-      sourceNodeId: z.string().optional(),
-      name: z.string().optional(),
-      spacing: z.number().optional(),
-      expiryDate: z.string().optional(),
-      timesRenewed: z.number().optional(),
-      maxRenewals: z.number().optional()
-    }
-  },
-  async ({ url, sourceNodeId, name, spacing, expiryDate, timesRenewed, maxRenewals }) => {
-    const result = await sendCommand("create_renewal_tab_screen", {
-      url,
-      sourceNodeId,
-      name,
-      spacing,
-      expiryDate,
-      timesRenewed,
-      maxRenewals
-    });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -2178,7 +3075,7 @@ server.registerTool(
   },
   async () => {
     const result = await sendCommand("getSelection", {});
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -2190,7 +3087,7 @@ server.registerTool(
   },
   async () => {
     const result = await sendCommand("getDocumentInfo", {});
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -2206,7 +3103,7 @@ server.registerTool(
   },
   async ({ nodeId, characters }) => {
     const result = await sendCommand("setText", { nodeId, characters });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -2225,7 +3122,7 @@ server.registerTool(
   },
   async ({ name, x, y, width, height }) => {
     const result = await sendCommand("createFrame", { name, x, y, width, height });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -2244,32 +3141,7 @@ server.registerTool(
   },
   async ({ name, x, y, width, height }) => {
     const result = await sendCommand("createRectangle", { name, x, y, width, height });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-  }
-);
-
-server.registerTool(
-  "figma_apply_sarawak_foundations",
-  {
-    title: "Apply Sarawak foundations",
-    description: "Creates the Foundations/Components/Patterns/AI Surfaces pages and applies Sarawak paint + shadow styles."
-  },
-  async () => {
-    const result = await sendCommand("applySarawakFoundations", {});
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-  }
-);
-
-server.registerTool(
-  "figma_reset_sarawak_design_system",
-  {
-    title: "Reset + generate Sarawak Design System",
-    description:
-      "Deletes non-target pages, ensures the 4 pages, applies Sarawak styles, and generates a design-system scaffold (placeholders) per instructions.md."
-  },
-  async () => {
-    const result = await sendCommand("reset_sarawak_design_system", {});
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -2294,7 +3166,7 @@ server.registerTool(
       y,
       fontSize
     });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -2310,7 +3182,7 @@ server.registerTool(
   },
   async ({ nodeId, name }) => {
     const result = await sendCommand("renameNode", { nodeId, name });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
 
@@ -2329,7 +3201,941 @@ server.registerTool(
   },
   async ({ nodeId, r, g, b, opacity }) => {
     const result = await sendCommand("setSolidFill", { nodeId, r, g, b, opacity });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "set_image_fill",
+  {
+    title: "Set image fill",
+    description: "Set an IMAGE fill on a node from a URL (createImageAsync), raw base64 imageBytes, or a local image file via localPath (read as base64 server-side). scaleMode: FILL, FIT, CROP, TILE.",
+    inputSchema: z
+      .object({
+        nodeId: z.string(),
+        url: z.string().optional(),
+        imageBytes: z.string().optional(),
+        localPath: z.string().optional(),
+        scaleMode: z.string().optional(),
+        paintIndex: z.number().optional(),
+        rotation: z.number().optional()
+      })
+      .refine((v) => v.url || v.imageBytes || v.localPath, { message: "Provide url, imageBytes, or localPath" })
+  },
+  async ({ nodeId, url, imageBytes, localPath, scaleMode, paintIndex, rotation }) => {
+    const resolvedImageBytes = localPath ? await readLocalFileAsBase64(localPath) : imageBytes;
+    const result = await sendCommand("set_image_fill", { nodeId, url, imageBytes: resolvedImageBytes, scaleMode, paintIndex, rotation });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "undo",
+  {
+    title: "Undo last action",
+    description: "Reverses the most recent auto-captured mutating action (snapshot-based, best-effort). Cannot restore deleted nodes or structural changes. Only works within the current plugin session while target-frame mutating actions were executed through this bridge."
+  },
+  async () => {
+    const result = await sendCommand("undo", {});
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "redo",
+  {
+    title: "Redo last undone action",
+    description: "Re-applies the most recently undone action (snapshot-based, best-effort)."
+  },
+  async () => {
+    const result = await sendCommand("redo", {});
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "get_style_guide",
+  {
+    title: "Get style guide",
+    description: "Extract a usage style guide from the current page (or rootNodeId subtree): counts of distinct solid colors (hex), color variable bindings, font family/style combos, font sizes, line heights, spacing/gap/padding values, corner radii, stroke weights, and opacities.",
+    inputSchema: {
+      rootNodeId: z.string().optional()
+    }
+  },
+  async ({ rootNodeId }) => {
+    const result = await sendCommand("get_style_guide", rootNodeId ? { rootNodeId } : {});
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "get_font_list",
+  {
+    title: "Get font list",
+    description: "List the distinct fonts (family + style) used in the current page or a rootNodeId subtree, with usage counts.",
+    inputSchema: {
+      rootNodeId: z.string().optional()
+    }
+  },
+  async ({ rootNodeId }) => {
+    const result = await sendCommand("get_font_list", rootNodeId ? { rootNodeId } : {});
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "distribute_nodes",
+  {
+    title: "Distribute nodes",
+    description: "Space or align a set of nodes along an axis. axis: horizontal|vertical. mode: gap (fixed gap), spaceBetween/evenly (fill bounds), center (center the cluster). crossAlign: none|start|center|end. Bounds default to the common parent; pass bounds {x1,y1,x2,y2} to override (horizontal coordinates) or {y1,x1,y2,x2} semantics for vertical.",
+    inputSchema: {
+      nodeIds: z.array(z.string()),
+      axis: z.string().optional(),
+      mode: z.string().optional(),
+      gap: z.number().optional(),
+      crossAlign: z.string().optional(),
+      bounds: z.object({ x1: z.number().optional(), y1: z.number().optional(), x2: z.number().optional(), y2: z.number().optional() }).optional()
+    }
+  },
+  async ({ nodeIds, axis, mode, gap, crossAlign, bounds }) => {
+    const result = await sendCommand("distribute_nodes", { nodeIds, axis, mode, gap, crossAlign, bounds });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "arrange_children",
+  {
+    title: "Arrange children",
+    description: "Distribute the direct children of a frame/node along the main axis (horizontal or vertical). Accepts the same mode/gap/crossAlign options as distribute_nodes. Bounds default to the parent.",
+    inputSchema: {
+      parentNodeId: z.string(),
+      axis: z.string().optional(),
+      mode: z.string().optional(),
+      gap: z.number().optional(),
+      crossAlign: z.string().optional()
+    }
+  },
+  async ({ parentNodeId, axis, mode, gap, crossAlign }) => {
+    const result = await sendCommand("arrange_children", { parentNodeId, axis, mode, gap, crossAlign });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "import_tokens",
+  {
+    title: "Import design tokens",
+    description: "Import a W3C-style Design Tokens JSON object into Figma variables (and optionally paint styles). Accepts nested {group:{name:{$type,$value}}} or plain nested values (types inferred from values). Creates/updates a variable collection (default 'Design Tokens') and a Default mode, then sets values. color -> COLOR variable + paint style, number/dimension -> FLOAT, string -> STRING, boolean -> BOOLEAN.",
+    inputSchema: {
+      tokens: z.record(z.any()),
+      collectionName: z.string().optional(),
+      modeName: z.string().optional(),
+      createStyles: z.boolean().optional()
+    }
+  },
+  async ({ tokens, collectionName, modeName, createStyles }) => {
+    const result = await sendCommand("import_tokens", { tokens, collectionName, modeName, createStyles });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "export_tokens",
+  {
+    title: "Export design tokens",
+    description: "Export all local Figma variables as a W3C-style Design Tokens object (nested by collection/variable name), plus a flat variables list. Colors are emitted as hex. Set includeModes=false to skip per-mode views.",
+    inputSchema: {
+      includeModes: z.boolean().optional()
+    }
+  },
+  async ({ includeModes }) => {
+    const result = await sendCommand("export_tokens", { includeModes });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "create_typography_scale",
+  {
+    title: "Create typography scale",
+    description: "Create a text-style scale (caption/body/h3/h2/h1/display by default, or custom steps) from a baseSize and ratio: fontSize = base * ratio^offset. Can also create sample text nodes in a frame (createSampleFrame) spanning the steps.",
+    inputSchema: {
+      baseSize: z.number().optional(),
+      ratio: z.number().optional(),
+      fontFamily: z.string().optional(),
+      fontStyle: z.string().optional(),
+      prefix: z.string().optional(),
+      steps: z.array(z.string()).optional(),
+      lineHeightRatio: z.number().optional(),
+      lineHeight: z.number().optional(),
+      letterSpacing: z.number().optional(),
+      createSampleFrame: z.boolean().optional(),
+      parentNodeId: z.string().optional()
+    }
+  },
+  async ({ baseSize, ratio, fontFamily, fontStyle, prefix, steps, lineHeightRatio, lineHeight, letterSpacing, createSampleFrame, parentNodeId }) => {
+    const result = await sendCommand("create_typography_scale", { baseSize, ratio, fontFamily, fontStyle, prefix, steps, lineHeightRatio, lineHeight, letterSpacing, createSampleFrame, parentNodeId });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "generate_palette",
+  {
+    title: "Generate palette",
+    description: "Generate a tonal 50..900 palette (default 10 steps) from a seed hex color. Light steps mix toward white, dark steps toward black. Optionally creates paint styles (createStyles=true), COLOR variables in a '<Name> Tokens' collection (createVariables=true), and a swatch frame with labeled rectangles (createFrame=true).",
+    inputSchema: {
+      hex: z.string(),
+      name: z.string().optional(),
+      steps: z.number().optional(),
+      prefix: z.string().optional(),
+      createStyles: z.boolean().optional(),
+      createVariables: z.boolean().optional(),
+      createFrame: z.boolean().optional(),
+      swatchWidth: z.number().optional(),
+      swatchHeight: z.number().optional(),
+      gap: z.number().optional(),
+      parentNodeId: z.string().optional()
+    }
+  },
+  async ({ hex, name, steps, prefix, createStyles, createVariables, createFrame, swatchWidth, swatchHeight, gap, parentNodeId }) => {
+    const result = await sendCommand("generate_palette", { hex, name, steps, prefix, createStyles, createVariables, createFrame, swatchWidth, swatchHeight, gap, parentNodeId });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "extract_component_set",
+  {
+    title: "Extract component set",
+    description: "Convert multiple existing frames (or components) into a variant component set: each frame becomes a COMPONENT, then they are combined into a COMPONENT_SET via combine_as_variants. Set propertyName to attempt adding a VARIANT property (best-effort).",
+    inputSchema: {
+      nodeIds: z.array(z.string()),
+      parentNodeId: z.string().optional(),
+      name: z.string().optional(),
+      propertyName: z.string().optional(),
+      gap: z.number().optional(),
+      gapX: z.number().optional(),
+      gapY: z.number().optional(),
+      columns: z.number().optional()
+    }
+  },
+  async ({ nodeIds, parentNodeId, name, propertyName, gap, gapX, gapY, columns }) => {
+    const result = await sendCommand("extract_component_set", { nodeIds, parentNodeId, name, propertyName, gap, gapX, gapY, columns });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "set_gradient_fill",
+  {
+    title: "Set gradient fill",
+    description: "Set a gradient fill (LINEAR, RADIAL, ANGULAR, DIAMOND) on a node. stops: [{position 0..1, color {r,g,b[,a]}}]. Optional from/to transform points (normalized), opacity, paintIndex.",
+    inputSchema: {
+      nodeId: z.string(),
+      gradientType: z.string().optional(),
+      stops: z.array(
+        z.object({
+          position: z.number().optional(),
+          color: z.object({ r: z.number(), g: z.number(), b: z.number(), a: z.number().optional() }).optional()
+        })
+      ),
+      from: z.object({ x: z.number().optional(), y: z.number().optional() }).optional(),
+      to: z.object({ x: z.number().optional(), y: z.number().optional() }).optional(),
+      opacity: z.number().optional(),
+      paintIndex: z.number().optional()
+    }
+  },
+  async ({ nodeId, gradientType, stops, from, to, opacity, paintIndex }) => {
+    const result = await sendCommand("set_gradient_fill", { nodeId, gradientType, stops, from, to, opacity, paintIndex });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "set_effects",
+  {
+    title: "Set effects",
+    description: "Set effects on a node. Pass effectStyleId to apply an existing style, or effects as raw array (DROP_SHADOW, INNER_SHADOW, LAYER_BLUR, BACKGROUND_BLUR). boundVariables.color can bind a variable to the shadow color.",
+    inputSchema: z
+      .object({
+        nodeId: z.string(),
+        effectStyleId: z.string().optional(),
+        effects: z.array(z.any()).optional(),
+        boundVariables: z.record(z.string()).optional()
+      })
+      .refine((v) => v.effectStyleId || (Array.isArray(v.effects) && v.effects.length > 0), {
+        message: "Provide either effectStyleId or a non-empty effects array"
+      })
+  },
+  async ({ nodeId, effectStyleId, effects, boundVariables }) => {
+    const result = await sendCommand("set_effects", { nodeId, effectStyleId, effects, boundVariables });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "create_vector",
+  {
+    title: "Create vector",
+    description: "Create a VECTOR node from SVG path data. vectorPaths: [{data, windingRule?}]. Supports fills, strokes, strokeWeight, parentNodeId, x, y.",
+    inputSchema: {
+      vectorPaths: z.array(z.object({ data: z.string(), windingRule: z.string().optional() })),
+      name: z.string().optional(),
+      fills: z.array(z.any()).optional(),
+      strokes: z.array(z.any()).optional(),
+      strokeWeight: z.number().optional(),
+      parentNodeId: z.string().optional(),
+      x: z.number().optional(),
+      y: z.number().optional()
+    }
+  },
+  async ({ vectorPaths, name, fills, strokes, strokeWeight, parentNodeId, x, y }) => {
+    const result = await sendCommand("create_vector", { vectorPaths, name, fills, strokes, strokeWeight, parentNodeId, x, y });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "set_vector_paths",
+  {
+    title: "Set vector paths",
+    description: "Replace the SVG path data on an existing VECTOR node.",
+    inputSchema: {
+      nodeId: z.string(),
+      vectorPaths: z.array(z.object({ data: z.string(), windingRule: z.string().optional() }))
+    }
+  },
+  async ({ nodeId, vectorPaths }) => {
+    const result = await sendCommand("set_vector_paths", { nodeId, vectorPaths });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "boolean_group",
+  {
+    title: "Boolean group",
+    description: "Combine 2+ vector nodes into a boolean group (UNION, SUBTRACT, INTERSECT, EXCLUDE).",
+    inputSchema: {
+      nodeIds: z.array(z.string()).min(2),
+      op: z.string().optional(),
+      parentNodeId: z.string().optional(),
+      name: z.string().optional()
+    }
+  },
+  async ({ nodeIds, op, parentNodeId, name }) => {
+    const result = await sendCommand("boolean_group", { nodeIds, op, parentNodeId, name });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "group_nodes",
+  {
+    title: "Group nodes",
+    description: "Wrap existing nodes in a GROUP.",
+    inputSchema: {
+      nodeIds: z.array(z.string()).min(1),
+      parentNodeId: z.string().optional(),
+      name: z.string().optional()
+    }
+  },
+  async ({ nodeIds, parentNodeId, name }) => {
+    const result = await sendCommand("group_nodes", { nodeIds, parentNodeId, name });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "ungroup_node",
+  {
+    title: "Ungroup node",
+    description: "Ungroup a GROUP node, moving its children up to the group's parent.",
+    inputSchema: {
+      nodeId: z.string()
+    }
+  },
+  async ({ nodeId }) => {
+    const result = await sendCommand("ungroup_node", { nodeId });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "create_section",
+  {
+    title: "Create section",
+    description: "Create a SECTION node. Optional fillColor {r,g,b,a}, sectionProperties (e.g. {sectionType}), and parentNodeId.",
+    inputSchema: {
+      name: z.string().optional(),
+      x: z.number().optional(),
+      y: z.number().optional(),
+      width: z.number().optional(),
+      height: z.number().optional(),
+      parentNodeId: z.string().optional(),
+      fillColor: z.object({ r: z.number(), g: z.number(), b: z.number(), a: z.number().optional() }).optional(),
+      sectionProperties: z.any().optional()
+    }
+  },
+  async ({ name, x, y, width, height, parentNodeId, fillColor, sectionProperties }) => {
+    const result = await sendCommand("create_section", { name, x, y, width, height, parentNodeId, fillColor, sectionProperties });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "set_text_style",
+  {
+    title: "Set text style",
+    description: "Apply a text style and/or fine-grained typography to a TEXT node. Pass textStyleId to apply an existing style; also supports fontFamily/fontStyle, fontSize, lineHeight (number|'AUTO'|{unit,value}), letterSpacing (number|{unit,value}), textCase, textDecoration, textAlignHorizontal/Vertical, paragraphIndent/Spacing, fillsHex/fills/fillStyleId, and boundVariables.",
+    inputSchema: {
+      nodeId: z.string(),
+      textStyleId: z.string().optional(),
+      fontFamily: z.string().optional(),
+      fontStyle: z.string().optional(),
+      fontSize: z.number().optional(),
+      lineHeight: z.union([z.number(), z.literal("AUTO"), z.object({ unit: z.string().optional(), value: z.number().optional() })]).optional(),
+      letterSpacing: z.union([z.number(), z.object({ unit: z.string().optional(), value: z.number().optional() })]).optional(),
+      textCase: z.string().optional(),
+      textDecoration: z.string().optional(),
+      textAlignHorizontal: z.string().optional(),
+      textAlignVertical: z.string().optional(),
+      paragraphIndent: z.number().optional(),
+      paragraphSpacing: z.number().optional(),
+      fillsHex: z.string().optional(),
+      fills: z.array(z.any()).optional(),
+      fillStyleId: z.string().optional(),
+      boundVariables: z.record(z.string()).optional()
+    }
+  },
+  async ({ nodeId, textStyleId, fontFamily, fontStyle, fontSize, lineHeight, letterSpacing, textCase, textDecoration, textAlignHorizontal, textAlignVertical, paragraphIndent, paragraphSpacing, fillsHex, fills, fillStyleId, boundVariables }) => {
+    const result = await sendCommand("set_text_style", {
+      nodeId, textStyleId, fontFamily, fontStyle, fontSize, lineHeight, letterSpacing, textCase, textDecoration, textAlignHorizontal, textAlignVertical, paragraphIndent, paragraphSpacing, fillsHex, fills, fillStyleId, boundVariables
+    });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "create_page",
+  {
+    title: "Create page",
+    description: "Create a new page in the document.",
+    inputSchema: {
+      name: z.string().optional()
+    }
+  },
+  async ({ name }) => {
+    const result = await sendCommand("create_page", { name });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "rename_page",
+  {
+    title: "Rename page",
+    description: "Rename a page by pageId.",
+    inputSchema: {
+      pageId: z.string(),
+      name: z.string()
+    }
+  },
+  async ({ pageId, name }) => {
+    const result = await sendCommand("rename_page", { pageId, name });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "delete_page",
+  {
+    title: "Delete page",
+    description: "Delete a page by pageId. Requires confirmDelete=true.",
+    inputSchema: {
+      pageId: z.string(),
+      confirmDelete: z.boolean()
+    }
+  },
+  async ({ pageId, confirmDelete }) => {
+    const result = await sendCommand("delete_page", { pageId, confirmDelete });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "duplicate_page",
+  {
+    title: "Duplicate page",
+    description: "Duplicate a page (including all contents) by pageId.",
+    inputSchema: {
+      pageId: z.string()
+    }
+  },
+  async ({ pageId }) => {
+    const result = await sendCommand("duplicate_page", { pageId });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "set_current_page",
+  {
+    title: "Set current page",
+    description: "Set the current/active page by pageId.",
+    inputSchema: {
+      pageId: z.string()
+    }
+  },
+  async ({ pageId }) => {
+    const result = await sendCommand("set_current_page", { pageId });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "reorder_page",
+  {
+    title: "Reorder page",
+    description: "Move a page to a new index in the page tab bar (0-based).",
+    inputSchema: {
+      pageId: z.string(),
+      index: z.number()
+    }
+  },
+  async ({ pageId, index }) => {
+    const result = await sendCommand("reorder_page", { pageId, index });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "generate_grid",
+  {
+    title: "Generate grid",
+    description: "Generate a grid of items inside a parent. Clones itemNodeId if given, otherwise creates rectangles of itemWidth x itemHeight. Use {i} in name for the running index.",
+    inputSchema: {
+      columns: z.number().int().min(1).optional(),
+      rows: z.number().int().min(1).optional(),
+      parentNodeId: z.string().optional(),
+      itemNodeId: z.string().optional(),
+      itemWidth: z.number().optional(),
+      itemHeight: z.number().optional(),
+      spacingX: z.number().optional(),
+      spacingY: z.number().optional(),
+      name: z.string().optional()
+    }
+  },
+  async ({ columns, rows, parentNodeId, itemNodeId, itemWidth, itemHeight, spacingX, spacingY, name }) => {
+    const result = await sendCommand("generate_grid", { columns, rows, parentNodeId, itemNodeId, itemWidth, itemHeight, spacingX, spacingY, name });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "bulk_rename",
+  {
+    title: "Bulk rename",
+    description: "Find-and-replace text in node names across a subtree (defaults to current page). Supports regex and dryRun. Returns a before/after diff.",
+    inputSchema: {
+      find: z.string(),
+      replace: z.string().optional(),
+      useRegex: z.boolean().optional(),
+      dryRun: z.boolean().optional(),
+      rootNodeId: z.string().optional()
+    }
+  },
+  async ({ find, replace, useRegex, dryRun, rootNodeId }) => {
+    const result = await sendCommand("bulk_rename", { find, replace, useRegex, dryRun, rootNodeId });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "bulk_update",
+  {
+    title: "Bulk update",
+    description: "Apply one property across many nodes. Supported properties: fillColor, cornerRadius, opacity, visible, name, fillStyle, textStyle, cornerRadii. Target by nodeIds, by nodeTypes under rootNodeId, or the whole current page.",
+    inputSchema: {
+      property: z.string(),
+      value: z.any(),
+      nodeIds: z.array(z.string()).optional(),
+      nodeTypes: z.array(z.string()).optional(),
+      rootNodeId: z.string().optional()
+    }
+  },
+  async ({ property, value, nodeIds, nodeTypes, rootNodeId }) => {
+    const result = await sendCommand("bulk_update", { property, value, nodeIds, nodeTypes, rootNodeId });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "replace_all_instances",
+  {
+    title: "Replace all instances",
+    description: "Swap every instance whose main component key matches sourceComponentKey to targetComponentKey. Supports dryRun and a rootNodeId scope.",
+    inputSchema: {
+      sourceComponentKey: z.string(),
+      targetComponentKey: z.string(),
+      dryRun: z.boolean().optional(),
+      rootNodeId: z.string().optional()
+    }
+  },
+  async ({ sourceComponentKey, targetComponentKey, dryRun, rootNodeId }) => {
+    const result = await sendCommand("replace_all_instances", { sourceComponentKey, targetComponentKey, dryRun, rootNodeId });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "set_variable_mode",
+  {
+    title: "Set variable mode",
+    description: "Theme switch: set the variable mode for one or many nodes. modeId can be a mode id or exact mode name. Scope via nodeIds, rootNodeId (recurse defaults true, pass recurse:false for the root only), or the whole current page.",
+    inputSchema: {
+      modeId: z.string(),
+      collectionId: z.string().optional(),
+      nodeIds: z.array(z.string()).optional(),
+      rootNodeId: z.string().optional(),
+      recurse: z.boolean().optional()
+    }
+  },
+  async ({ modeId, collectionId, nodeIds, rootNodeId, recurse }) => {
+    const result = await sendCommand("set_variable_mode", { modeId, collectionId, nodeIds, rootNodeId, recurse });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "create_variable_mode",
+  {
+    title: "Create variable mode",
+    description: "Add a new mode to a variable collection.",
+    inputSchema: {
+      collectionId: z.string(),
+      name: z.string()
+    }
+  },
+  async ({ collectionId, name }) => {
+    const result = await sendCommand("create_variable_mode", { collectionId, name });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "rename_variable_mode",
+  {
+    title: "Rename variable mode",
+    description: "Rename a mode within a variable collection.",
+    inputSchema: {
+      collectionId: z.string(),
+      modeId: z.string(),
+      name: z.string()
+    }
+  },
+  async ({ collectionId, modeId, name }) => {
+    const result = await sendCommand("rename_variable_mode", { collectionId, modeId, name });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "delete_variable_mode",
+  {
+    title: "Delete variable mode",
+    description: "Remove a mode from a variable collection. Requires confirmDelete=true.",
+    inputSchema: {
+      collectionId: z.string(),
+      modeId: z.string(),
+      confirmDelete: z.boolean()
+    }
+  },
+  async ({ collectionId, modeId, confirmDelete }) => {
+    const result = await sendCommand("delete_variable_mode", { collectionId, modeId, confirmDelete });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "rename_variable_collection",
+  {
+    title: "Rename variable collection",
+    description: "Rename a variable collection by collectionId.",
+    inputSchema: {
+      collectionId: z.string(),
+      name: z.string()
+    }
+  },
+  async ({ collectionId, name }) => {
+    const result = await sendCommand("rename_variable_collection", { collectionId, name });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "subscribe_events",
+  {
+    title: "Subscribe to events",
+    description: "Start pushing Figma events (selectionchange, documentchange) to the bridge. They land in the event log read via get_events.",
+    inputSchema: {
+      events: z.array(z.string())
+    }
+  },
+  async ({ events }) => {
+    const result = await sendCommand("subscribe_events", { events });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "unsubscribe_events",
+  {
+    title: "Unsubscribe from events",
+    description: "Stop pushing selected Figma events to the bridge.",
+    inputSchema: {
+      events: z.array(z.string())
+    }
+  },
+  async ({ events }) => {
+    const result = await sendCommand("unsubscribe_events", { events });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "get_events",
+  {
+    title: "Get events",
+    description: "Read pushed Figma events (selectionchange/documentchange) since a sequence cursor. Pass the previous call's currentSeq as sinceSeq to page forward. Cursor state lives in the MCP server process and resets on restart.",
+    inputSchema: {
+      sinceSeq: z.number().int().min(0).optional()
+    }
+  },
+  async ({ sinceSeq }) => {
+    const since = Number(sinceSeq) || 0;
+    const events = eventLog.filter((e) => e.seq > since);
+    return { content: [{ type: "text", text: JSON.stringify({ currentSeq: eventSeq, sinceSeq: since, eventCount: events.length, events }) }] };
+  }
+);
+
+server.registerTool(
+  "list_channels",
+  {
+    title: "List channels",
+    description: "Channel dashboard: lists every connected Figma plugin channel with its fileKey/fileName and connection time.",
+    inputSchema: {}
+  },
+  async () => {
+    const entries = [];
+    for (const [name, socket] of channels.entries()) {
+      if (!isOpenSocket(socket)) continue;
+      const meta = socketMeta.get(socket) || {};
+      entries.push({
+        channel: name,
+        connected: true,
+        fileKey: meta.fileKey || null,
+        fileName: meta.fileName || null,
+        connectedAt: meta.connectedAt || null
+      });
+    }
+    return {
+      content: [{ type: "text", text: JSON.stringify({ activeChannel, channels: entries }) }]
+    };
+  }
+);
+
+server.registerTool(
+  "list_comments",
+  {
+    title: "List comments",
+    description: "List comments on a Figma file via the REST API (requires FIGMA_TOKEN).",
+    inputSchema: {
+      fileKey: z.string()
+    }
+  },
+  async ({ fileKey }) => {
+    const key = String(fileKey || "").trim();
+    if (!key) throw new Error("Missing fileKey");
+    const data = await figmaApiJson(`/v1/files/${key}/comments`, {});
+    return { content: [{ type: "text", text: JSON.stringify(data) }] };
+  }
+);
+
+server.registerTool(
+  "post_comment",
+  {
+    title: "Post comment",
+    description: "Create a comment on a Figma file via the REST API (requires FIGMA_TOKEN). Optional nodeId anchors it to a node; clientMeta {x,y[,nodeId]} positions it on the canvas.",
+    inputSchema: {
+      fileKey: z.string(),
+      message: z.string(),
+      nodeId: z.string().optional(),
+      clientMeta: z.object({ x: z.number().optional(), y: z.number().optional(), nodeId: z.string().optional() }).optional()
+    }
+  },
+  async ({ fileKey, message, nodeId, clientMeta }) => {
+    const key = String(fileKey || "").trim();
+    if (!key) throw new Error("Missing fileKey");
+    if (!String(message || "").trim()) throw new Error("Missing message");
+    const body = { message: String(message) };
+    const meta = {};
+    if (clientMeta && clientMeta.x !== undefined) meta.x = clientMeta.x;
+    if (clientMeta && clientMeta.y !== undefined) meta.y = clientMeta.y;
+    if (nodeId) meta.node_id = String(nodeId);
+    else if (clientMeta && clientMeta.nodeId) meta.node_id = String(clientMeta.nodeId);
+    if (Object.keys(meta).length) body.client_meta = meta;
+    const data = await figmaApiJson(`/v1/files/${key}/comments`, undefined, "POST", body);
+    return { content: [{ type: "text", text: JSON.stringify(data) }] };
+  }
+);
+
+server.registerTool(
+  "delete_comment",
+  {
+    title: "Delete comment",
+    description: "Delete a comment from a Figma file via the REST API (requires FIGMA_TOKEN).",
+    inputSchema: {
+      fileKey: z.string(),
+      commentId: z.string()
+    }
+  },
+  async ({ fileKey, commentId }) => {
+    const key = String(fileKey || "").trim();
+    if (!key) throw new Error("Missing fileKey");
+    await figmaApiJson(`/v1/files/${key}/comments/${String(commentId)}`, undefined, "DELETE");
+    return { content: [{ type: "text", text: JSON.stringify({ success: true, commentId: String(commentId) }) }] };
+  }
+);
+
+server.registerTool(
+  "search_components",
+  {
+    title: "Search components",
+    description: "Search for components/component-sets via the Figma REST API (requires FIGMA_TOKEN). Provide teamId to use /v1/team/{teamId}/components, or omit it to use /v1/me/components. Optional fileKey and pageSize filter the results.",
+    inputSchema: {
+      teamId: z.string().optional(),
+      fileKey: z.string().optional(),
+      pageSize: z.number().optional(),
+      type: z.string().optional()
+    }
+  },
+  async ({ teamId, fileKey, pageSize, type }) => {
+    requireFigmaToken();
+    const query = {};
+    if (pageSize !== undefined) query.page_size = pageSize;
+    if (fileKey) query.file_key = fileKey;
+    const pathname = teamId ? `/v1/team/${String(teamId).trim()}/components` : "/v1/me/components";
+    const data = await figmaApiJson(pathname, query);
+    let list = Array.isArray(data && data.meta && data.meta.components) ? data.meta.components : [];
+    if (String(type || "").toLowerCase() === "set") {
+      list = list.filter((c) => Boolean(c.component_set_id));
+    } else if (String(type || "").toLowerCase() === "component") {
+      list = list.filter((c) => !c.component_set_id);
+    }
+    const compact = list.map((c) => ({
+      key: c.key,
+      name: c.name,
+      description: c.description,
+      fileKey: c.file_key,
+      user: c.user && c.user.handle,
+      containingFrame: c.containing_frame && c.containing_frame.name,
+      thumbnail: c.thumbnail_url,
+      componentSetId: c.component_set_id || null
+    }));
+    return { content: [{ type: "text", text: JSON.stringify({ meta: data && data.meta, count: compact.length, components: compact }) }] };
+  }
+);
+
+server.registerTool(
+  "export_frames_to_disk",
+  {
+    title: "Export frames to disk",
+    description: "Bulk-export frames from a Figma file to local disk via the REST API (requires FIGMA_TOKEN). Pass nodeIds, or pass pageId to export all top-level frames on a page. Renders PNG/JPG/SVG/PDF into a folder inside the figma-write-bridge repo.",
+    inputSchema: {
+      fileKey: z.string(),
+      nodeIds: z.array(z.string()).optional(),
+      pageId: z.string().optional(),
+      format: z.string().optional(),
+      scale: z.number().optional(),
+      localPath: z.string(),
+      fileNamePrefix: z.string().optional()
+    }
+  },
+  async ({ fileKey, nodeIds, pageId, format, scale, localPath, fileNamePrefix }) => {
+    const key = String(fileKey || "").trim();
+    if (!key) throw new Error("Missing fileKey");
+    const outDir = resolveSafeOutputDir(localPath);
+    await mkdir(outDir, { recursive: true });
+    const fmt = String(format || "png").toLowerCase();
+    if (!["png", "jpg", "jpeg", "svg", "pdf"].includes(fmt)) throw new Error("Unsupported format: " + format);
+    const apiFormat = fmt === "jpeg" ? "jpg" : fmt;
+    const ext = apiFormat;
+    const scaleValue = typeof scale === "number" && Number.isFinite(scale) && scale > 0 ? scale : 2;
+    const prefix = typeof fileNamePrefix === "string" && fileNamePrefix.trim() ? String(fileNamePrefix).trim() + "-" : "";
+    let ids = Array.isArray(nodeIds) ? nodeIds.map(String).filter(Boolean) : [];
+    const namesById = {};
+    if (!ids.length) {
+      const file = await figmaApiJson(`/v1/files/${key}`, { depth: 2 });
+      const pages = (file && file.document && file.document.children) || [];
+      for (const page of pages) {
+        if (pageId && page.id !== pageId) continue;
+        for (const frame of page.children || []) {
+          if (frame.type !== "FRAME" && frame.type !== "COMPONENT" && frame.type !== "COMPONENT_SET" && frame.type !== "SECTION") continue;
+          ids.push(frame.id);
+          namesById[frame.id] = frame.name || "";
+        }
+      }
+    } else {
+      try {
+        const nodesRes = await figmaApiJson(`/v1/files/${key}/nodes`, { ids: ids.join(",") });
+        const nodes = (nodesRes && nodesRes.nodes) || {};
+        for (const nid of Object.keys(nodes)) {
+          const n = nodes[nid] && nodes[nid].document;
+          if (n) namesById[nid] = n.name || "";
+        }
+      } catch (_err) {}
+    }
+    if (!ids.length) throw new Error("No frames to export (pass nodeIds or pageId)");
+    const downloaded = [];
+    const errors = [];
+    const CHUNK = 50;
+    for (let i = 0; i < ids.length; i += CHUNK) {
+      const chunk = ids.slice(i, i + CHUNK);
+      const exportData = await figmaApiJson(`/v1/images/${key}`, {
+        ids: chunk.join(","),
+        format: apiFormat,
+        scale: apiFormat === "png" || apiFormat === "jpg" ? scaleValue : undefined
+      });
+      const urls = (exportData && exportData.images) || {};
+      for (const nodeId of chunk) {
+        const url = String(urls[nodeId] || "");
+        if (!url) {
+          errors.push({ nodeId, error: "No export URL returned" });
+          continue;
+        }
+        try {
+          const buf = await httpGetBuffer(url);
+          const safeName = String(namesById[nodeId] || "").replace(/[\\/:*?"<>|]/g, "-").slice(0, 80) || nodeId;
+          const fileName = `${prefix}${safeName}-${nodeId}.${ext}`;
+          const absFilePath = resolve(outDir, fileName);
+          const rel = relative(outDir, absFilePath);
+          if (rel.startsWith("..") || isAbsolute(rel)) {
+            errors.push({ nodeId, error: "fileName escapes localPath" });
+            continue;
+          }
+          await writeFile(absFilePath, buf);
+          downloaded.push({ nodeId, fileName: safeName, savedPath: absFilePath });
+        } catch (e) {
+          errors.push({ nodeId, url, error: e instanceof Error ? e.message : String(e) });
+        }
+      }
+    }
+    return {
+      content: [{ type: "text", text: JSON.stringify({ outDir, format: ext, scale: scaleValue, exportedCount: downloaded.length, downloaded, errors }) }]
+    };
   }
 );
 
