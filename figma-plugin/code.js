@@ -1874,14 +1874,26 @@ async function getLocalComponents(params) {
   const page = figma.currentPage;
   const includeComponentSets = params && params.includeComponentSets !== undefined ? Boolean(params.includeComponentSets) : true;
   const nodes = page.findAll((n) => {
-    if (n.type === "COMPONENT") return true;
+    if (n.type === "COMPONENT") {
+      // A variant component is a child of a COMPONENT_SET. Reading
+      // componentPropertyDefinitions on a variant throws in the Plugin API,
+      // and variants are already represented by their parent COMPONENT_SET,
+      // so skip them here.
+      if (n.parent && n.parent.type === "COMPONENT_SET") return false;
+      return true;
+    }
     if (includeComponentSets && n.type === "COMPONENT_SET") return true;
     return false;
   });
   return nodes.map((n) => {
-    const defs = n.componentPropertyDefinitions
-      ? simplifyComponentPropertyDefinitionsForRead(n.componentPropertyDefinitions)
-      : {};
+    let defs = {};
+    try {
+      defs = n.componentPropertyDefinitions
+        ? simplifyComponentPropertyDefinitionsForRead(n.componentPropertyDefinitions)
+        : {};
+    } catch {
+      defs = {};
+    }
     return {
       id: n.id,
       name: n.name,
