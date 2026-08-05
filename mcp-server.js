@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { createServer } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, extname, isAbsolute, relative, resolve } from "node:path";
@@ -13,8 +14,7 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)));
 const wsHost = process.env.FIGMA_BRIDGE_HOST || "127.0.0.1";
 const wsPort = Number(process.env.FIGMA_BRIDGE_PORT || "8787");
 const commandTimeoutMs = Number(process.env.FIGMA_BRIDGE_TIMEOUT_MS || "180000");
-const defaultChannel = process.env.FIGMA_BRIDGE_CHANNEL || "default";
-const bridgeSecret = process.env.FIGMA_BRIDGE_SECRET || "";
+const defaultChannel = normalizeChannelName(process.env.FIGMA_BRIDGE_CHANNEL) || "default";
 const transitionTypeSchema = z.enum(["DISSOLVE", "SMART_ANIMATE", "SCROLL_ANIMATE", "MOVE_IN", "MOVE_OUT", "PUSH", "SLIDE_IN", "SLIDE_OUT"]);
 const directionalTransitionTypeSchema = z.enum(["MOVE_IN", "MOVE_OUT", "PUSH", "SLIDE_IN", "SLIDE_OUT"]);
 const transitionDirectionSchema = z.enum(["LEFT", "RIGHT", "TOP", "BOTTOM"]);
@@ -237,7 +237,41 @@ function readNumberArg(name, fallback) {
   return Number.isFinite(value) ? value : fallback;
 }
 
-const wss = new WebSocketServer({ host: wsHost, port: wsPort });
+const httpServer = createServer((req, res) => {
+  if (req.method === "GET" && (req.url === "/health" || req.url === "/health/")) {
+    res.setHeader("Content-Type", "application/json");
+    res.end(
+      JSON.stringify({
+        name: "figma-write-bridge",
+        version: "0.1.0",
+        wsUrl: `ws://${wsHost}:${wsPort}`,
+        host: wsHost,
+        port: wsPort,
+        channel: defaultChannel,
+        activeChannel,
+        connectedChannels: connectedChannelsInfo()
+      })
+    );
+    return;
+  }
+  res.statusCode = 404;
+  res.end();
+});
+
+httpServer.on("error", (err) => {
+  if (err && err.code === "EADDRINUSE") {
+    console.error(
+      `[figma-write-bridge] Cannot bind WebSocket server to ${wsHost}:${wsPort}: port already in use.\n` +
+        `Another figma-write-bridge instance is already running there. Stop it, or start this MCP server with a ` +
+        `different FIGMA_BRIDGE_PORT and configure the plugin UI to the matching host:port (and channel).`
+    );
+    process.exit(1);
+  }
+  console.error(err?.stack ?? String(err));
+});
+
+const wss = new WebSocketServer({ server: httpServer });
+httpServer.listen(wsPort, wsHost);
 
 const channels = new Map();
 const socketToChannel = new Map();
@@ -263,10 +297,32 @@ function isOpenSocket(socket) {
   return Boolean(socket && socket.readyState === WebSocket.OPEN);
 }
 
+function normalizeChannelName(name) {
+  const raw = typeof name === "string" ? name.trim() : "";
+  if (!raw || raw.length > 64) return null;
+  if (/[^A-Za-z0-9._-]/.test(raw)) return null;
+  return raw;
+}
+
+function connectedChannelsInfo() {
+  const out = [];
+  for (const [name, socket] of channels.entries()) {
+    if (!isOpenSocket(socket)) continue;
+    const meta = socketMeta.get(socket) || {};
+    out.push({ channel: name, fileKey: meta.fileKey || null, fileName: meta.fileName || null });
+  }
+  return out;
+}
+
 function markSocketRole(socket, role) {
-  const prev = socketMeta.get(socket);
-  const connectedAt = prev?.connectedAt ?? Date.now();
-  socketMeta.set(socket, { connectedAt, role: String(role) });
+  const prev = socketMeta.get(socket) || {};
+  const connectedAt = prev.connectedAt ?? Date.now();
+  socketMeta.set(socket, {
+    connectedAt,
+    role: String(role),
+    fileKey: prev.fileKey || null,
+    fileName: prev.fileName || null
+  });
 }
 
 function getFallbackSocket() {
@@ -294,9 +350,6 @@ function getSocketForChannel(channelName) {
   return getActiveSocket();
 }
 
-// Fire-and-forget sync of the server's targetFrameIds into the plugin so the
-// plugin can enforce scope itself. The plugin replies with a result message
-// whose id is not tracked in pending, which the result handler safely ignores.
 function sendTargetFramesSync(socket) {
   const s = socket || getActiveSocket();
   if (!isOpenSocket(s)) return;
@@ -312,20 +365,10 @@ function sendTargetFramesSync(socket) {
   } catch {}
 }
 
-// ---------------------------------------------------------------------------
-// Change log (backs get_changes_since so the agent can re-read only what it
-// touched instead of the whole document). Lives in this Node process, not the
-// plugin, so it survives plugin UI reloads within the same MCP server session.
-// ---------------------------------------------------------------------------
-
 let changeSeq = 0;
 const CHANGE_LOG_MAX = 500;
 const changeLog = [];
 
-// Push events (selectionchange / documentchange) pushed from the plugin into a
-// ring buffer. Read back with the get_events tool (pass the previous
-// currentSeq as sinceSeq to page forward). Lives in this process, reset on
-// restart — same lifecycle as the change log.
 let eventSeq = 0;
 const EVENT_LOG_MAX = 300;
 const eventLog = [];
@@ -412,7 +455,13 @@ function sendCommand(action, payload, socketOverride) {
     pending.set(id, { resolve, reject, timeout, socket });
   });
 
-  socket.send(JSON.stringify({ type: "command", id, action, payload }));
+  try {
+    socket.send(JSON.stringify({ type: "command", id, action, payload }));
+  } catch (err) {
+    clearTimeout(timeout);
+    pending.delete(id);
+    throw err;
+  }
 
   if (socketOverride || READ_ONLY_ACTION_RE.test(actionName) || NON_MUTATING_ACTIONS.has(actionName)) return promise;
 
@@ -421,10 +470,6 @@ function sendCommand(action, payload, socketOverride) {
     return result;
   });
 }
-
-wss.on("error", (err) => {
-  console.error(err?.stack ?? String(err));
-});
 
 wss.on("connection", (socket) => {
   socketToChannel.set(socket, null);
@@ -441,21 +486,20 @@ wss.on("connection", (socket) => {
 
     if (!msg || typeof msg.type !== "string") return;
 
-    const authRequiredTypes = ["join", "set_active_channel", "control", "status"];
-    if (bridgeSecret && authRequiredTypes.includes(msg.type) && msg.secret !== bridgeSecret) {
-      try {
-        socket.send(JSON.stringify({ type: "system", message: "Unauthorized: missing or invalid FIGMA_BRIDGE_SECRET" }));
-      } catch {}
-      try {
-        socket.close();
-      } catch {}
-      return;
-    }
-
     if (msg.type === "join") {
-      const channel = typeof msg.channel === "string" && msg.channel.trim() ? msg.channel.trim() : defaultChannel;
+      let channel = defaultChannel;
+      if (msg.channel !== undefined && msg.channel !== null && String(msg.channel).trim() !== "") {
+        const normalized = normalizeChannelName(String(msg.channel));
+        if (!normalized) {
+          try {
+            socket.send(JSON.stringify({ type: "system", message: "Invalid channel name: must be 1-64 chars of A-Z a-z 0-9 . _ -" }));
+          } catch {}
+          return;
+        }
+        channel = normalized;
+      }
       const prev = socketToChannel.get(socket);
-      if (prev) channels.delete(prev);
+      if (prev && channels.get(prev) === socket) channels.delete(prev);
       socketToChannel.set(socket, channel);
       channels.set(channel, socket);
       markSocketRole(socket, "plugin");
@@ -477,7 +521,17 @@ wss.on("connection", (socket) => {
       markSocketRole(socket, "client");
       clientSockets.add(socket);
       unclaimedSockets.delete(socket);
-      const channel = typeof msg.channel === "string" && msg.channel.trim() ? msg.channel.trim() : defaultChannel;
+      let channel = defaultChannel;
+      if (msg.channel !== undefined && msg.channel !== null && String(msg.channel).trim() !== "") {
+        const normalized = normalizeChannelName(String(msg.channel));
+        if (!normalized) {
+          try {
+            socket.send(JSON.stringify({ type: "system", message: "Invalid channel name: must be 1-64 chars of A-Z a-z 0-9 . _ -" }));
+          } catch {}
+          return;
+        }
+        channel = normalized;
+      }
       activeChannel = channel;
       try {
         socket.send(JSON.stringify({ type: "system", channel, message: `Active channel: ${channel}` }));
@@ -523,9 +577,8 @@ wss.on("connection", (socket) => {
             result: {
               wsUrl: `ws://${wsHost}:${wsPort}`,
               activeChannel,
-              connectedChannels: Array.from(channels.entries())
-                .filter(([, s]) => s && s.readyState === WebSocket.OPEN)
-                .map(([name]) => name)
+              connectedChannels: connectedChannelsInfo().map((c) => c.channel),
+              channels: connectedChannelsInfo()
             }
           })
         );
@@ -582,7 +635,7 @@ wss.on("connection", (socket) => {
 
   socket.on("close", () => {
     const channel = socketToChannel.get(socket);
-    if (channel) channels.delete(channel);
+    if (channel && channels.get(channel) === socket) channels.delete(channel);
     socketToChannel.delete(socket);
     socketMeta.delete(socket);
     unclaimedSockets.delete(socket);
@@ -608,13 +661,13 @@ wss.on("connection", (socket) => {
         }
         console.log(JSON.stringify({ ok: true, created }, null, 2));
         socket.close();
-        wss.close(() => process.exit(0));
+        httpServer.close(() => process.exit(0));
       } catch (err) {
         console.error(err?.stack ?? String(err));
         try {
           socket.close();
         } catch {}
-        wss.close(() => process.exit(1));
+        httpServer.close(() => process.exit(1));
       }
     })();
   }
@@ -685,6 +738,7 @@ const ALLOWED_MCP_TOOLS = new Set([
   "export_node_as_image",
   "scan_text_nodes",
   "scan_nodes_by_types",
+  "find_nodes",
   "get_annotations",
   "set_annotation",
   "set_multiple_annotations",
@@ -739,13 +793,7 @@ const ALLOWED_MCP_TOOLS = new Set([
   "set_focus",
   "set_selections",
   "read_my_design",
-  "figma_get_selection",
-  "figma_get_document_info",
   "figma_set_text",
-  "figma_create_frame",
-  "figma_create_rectangle",
-  "figma_create_text",
-  "figma_rename_node",
   "figma_set_solid_fill",
   "set_image_fill",
   "set_gradient_fill",
@@ -794,11 +842,83 @@ const ALLOWED_MCP_TOOLS = new Set([
   "search_components"
 ]);
 
+const MAX_RESULT_BYTES = Number(process.env.FIGMA_BRIDGE_MAX_RESULT_BYTES || "50000");
+
+function truncateResultText(text) {
+  if (Buffer.byteLength(text, "utf8") <= MAX_RESULT_BYTES) return text;
+  let slice = String(text).slice(0, MAX_RESULT_BYTES);
+  while (Buffer.byteLength(slice, "utf8") > MAX_RESULT_BYTES) slice = slice.slice(0, slice.length - 100);
+  return slice + `\n\n[TRUNCATED: result exceeded ${MAX_RESULT_BYTES} bytes; pass tighter options (e.g. maxDepth, chunkSize, maxChars, includeProperties: false) to narrow the response]`;
+}
+
+function toColumnar(items) {
+  if (!Array.isArray(items)) return null;
+  const fields = [];
+  const seen = new Set();
+  for (const item of items) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+    for (const key of Object.keys(item)) {
+      if (item[key] === undefined || seen.has(key)) continue;
+      seen.add(key);
+      fields.push(key);
+    }
+  }
+  return {
+    fields,
+    rows: items.map((item) => fields.map((field) => (item[field] === undefined ? null : item[field])))
+  };
+}
+
+function flattenCompactTree(node, depth, out) {
+  if (!node || typeof node !== "object") return out;
+  const { children, ...rest } = node;
+  out.push({ depth, ...rest });
+  if (Array.isArray(children)) {
+    for (const child of children) flattenCompactTree(child, depth + 1, out);
+  }
+  return out;
+}
+
+function slimToolListPayload(message) {
+  const tools = message && message.result && message.result.tools;
+  if (!Array.isArray(tools)) return message;
+  const normalize = (value) => String(value).toLowerCase().replace(/[^a-z0-9]/g, "");
+  return {
+    ...message,
+    result: {
+      ...message.result,
+      tools: tools.map((tool) => {
+        const slim = { ...tool };
+        if (slim.title && normalize(slim.title) === normalize(slim.name)) delete slim.title;
+        if (slim.inputSchema && typeof slim.inputSchema === "object" && "$schema" in slim.inputSchema) {
+          const { $schema, ...rest } = slim.inputSchema;
+          slim.inputSchema = rest;
+        }
+        return slim;
+      })
+    }
+  };
+}
+
 {
   const originalRegisterTool = server.registerTool.bind(server);
   server.registerTool = (name, meta, handler) => {
     if (!ALLOWED_MCP_TOOLS.has(String(name))) return;
-    return originalRegisterTool(name, meta, handler);
+    return originalRegisterTool(name, meta, async (...args) => {
+      const result = await handler(...args);
+      if (result && Array.isArray(result.content)) {
+        return {
+          ...result,
+          content: result.content.map((c) => {
+            if (c && c.type === "text" && typeof c.text === "string") {
+              return { ...c, text: truncateResultText(c.text) };
+            }
+            return c;
+          })
+        };
+      }
+      return result;
+    });
   };
 }
 
@@ -806,7 +926,7 @@ server.registerTool(
   "figma_bridge_status",
   {
     title: "Figma bridge status",
-    description: "Returns whether the local Figma plugin is connected."
+    description: "Returns whether the local Figma plugin is connected, the active channel, and every connected channel with the Figma file it belongs to. The channel defaults to \"default\" and is tied to this server's FIGMA_BRIDGE_CHANNEL; the plugin UI joins that channel (one plugin = one channel/server)."
   },
   async () => ({
     content: [
@@ -817,9 +937,8 @@ server.registerTool(
             wsUrl: `ws://${wsHost}:${wsPort}`,
             activeChannel,
             connected: Boolean(getActiveSocket()),
-            connectedChannels: Array.from(channels.entries())
-              .filter(([, s]) => s && s.readyState === WebSocket.OPEN)
-              .map(([name]) => name)
+            connectedChannels: connectedChannelsInfo().map((c) => c.channel),
+            channels: connectedChannelsInfo()
           }
         )
       }
@@ -831,7 +950,7 @@ server.registerTool(
   "join_channel",
   {
     title: "Join channel",
-    description: "Selects which connected Figma plugin channel to target for subsequent commands.",
+    description: "Selects which connected Figma plugin channel to target for subsequent commands. Channels default to \"default\" and are configured per MCP server via FIGMA_BRIDGE_CHANNEL; the plugin UI joins that channel. Use figma_bridge_status to see which channel maps to which file.",
     inputSchema: {
       channel: z.string()
     }
@@ -858,7 +977,7 @@ server.registerTool(
   "get_figma_data",
   {
     title: "Get Figma data",
-    description: "Get Figma file data via the Figma REST API.",
+    description: "Get Figma file data via the REST API. Pass nodeId to fetch only that node (avoids pulling the whole file). depth limits recursion on file/nodes. Returns file (or nodes), plus styles/components/component_sets when no nodeId is given.",
     inputSchema: {
       fileKey: z.string(),
       nodeId: z.string().optional(),
@@ -869,31 +988,26 @@ server.registerTool(
     const key = String(fileKey || "").trim();
     if (!key) throw new Error("Missing fileKey");
     const depthValue = typeof depth === "number" && Number.isFinite(depth) ? depth : undefined;
-
-    const filePromise = figmaApiJson(`/v1/files/${key}`, depthValue !== undefined ? { depth: depthValue } : undefined);
-    const stylesPromise = figmaApiJson(`/v1/files/${key}/styles`, {});
-    const componentsPromise = figmaApiJson(`/v1/files/${key}/components`, {});
-    const componentSetsPromise = figmaApiJson(`/v1/files/${key}/component_sets`, {});
+    const depthArg = depthValue !== undefined ? { depth: depthValue } : undefined;
 
     const nodeIdValue = typeof nodeId === "string" && nodeId.trim() ? nodeId.trim() : "";
-    const nodesPromise = nodeIdValue
-      ? figmaApiJson(
-          `/v1/files/${key}/nodes`,
-          Object.assign({ ids: nodeIdValue }, depthValue !== undefined ? { depth: depthValue } : {})
-        )
-      : Promise.resolve(undefined);
 
-    const [file, nodes, styles, components, componentSets] = await Promise.all([
-      filePromise,
-      nodesPromise,
-      stylesPromise,
-      componentsPromise,
-      componentSetsPromise
+    if (nodeIdValue) {
+      const nodes = await figmaApiJson(
+        `/v1/files/${key}/nodes`,
+        Object.assign({ ids: nodeIdValue }, depthArg || {})
+      );
+      return { content: [{ type: "text", text: JSON.stringify({ nodes }) }] };
+    }
+
+    const [file, styles, components, componentSets] = await Promise.all([
+      figmaApiJson(`/v1/files/${key}`, depthArg),
+      figmaApiJson(`/v1/files/${key}/styles`, {}),
+      figmaApiJson(`/v1/files/${key}/components`, {}),
+      figmaApiJson(`/v1/files/${key}/component_sets`, {})
     ]);
 
-    const result = { file, styles, components, componentSets };
-    if (nodes !== undefined) result.nodes = nodes;
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    return { content: [{ type: "text", text: JSON.stringify({ file, styles, components, componentSets }) }] };
   }
 );
 
@@ -1108,10 +1222,13 @@ server.registerTool(
   "get_all_pages",
   {
     title: "Get all pages",
-    description: "Compact map of every page in the open file: per page id/name/childCount plus its top-level frames (id/name/type/childCount). Use this once to get a full-file overview before targeted reads."
+    description: "Compact map of every page in the open file: id/name/childCount. Pass includeTopLevel: true to also list each page's top-level frames (id/name/type/childCount). Use this once to get a full-file overview before targeted reads.",
+    inputSchema: {
+      includeTopLevel: z.boolean().optional().describe("Include each page's top-level frames. Default false to keep output small.")
+    }
   },
-  async () => {
-    const result = await sendCommand("get_all_pages", {});
+  async ({ includeTopLevel }) => {
+    const result = await sendCommand("get_all_pages", { includeTopLevel });
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -1120,18 +1237,25 @@ server.registerTool(
   "get_document_tree",
   {
     title: "Get document tree",
-    description: "Compact structural tree of the whole document (or a subtree) for full-context reads. Every node is {id, name, type}; TEXT nodes include characters by default. Options: rootNodeId (default whole file), maxDepth (levels of children to expand), excludeTypes (e.g. [\"VECTOR\"]), fields (extra per-node fields: fills, strokes, absoluteBoundingBox, strokeWeight, cornerRadius, fillStyleId, strokeStyleId, textStyleId, layoutMode, itemSpacing, padding, visible, opacity), includeHidden (default true).",
+    description: "Compact structural tree of the whole document (or a subtree) for full-context reads. Returns a flattened columnar table: fields lists the column names, rows holds one array per node in pre-order, and the depth column gives nesting level (depth 0 is the root, each +1 is a child of the nearest preceding row with depth-1). Every node is {id, name, type}; no extra fields unless requested. Default maxDepth is 3 (bounded output); pass a larger maxDepth for deeper expansion and fields: [\"characters\"] to include TEXT content. Options: rootNodeId (default whole file), maxDepth, excludeTypes (e.g. [\"VECTOR\"]), fields (extra per-node fields: characters, fills, strokes, absoluteBoundingBox, strokeWeight, cornerRadius, fillStyleId, strokeStyleId, textStyleId, layoutMode, itemSpacing, padding, visible, opacity), includeHidden (default true), verbose (return the original nested tree instead).",
     inputSchema: {
       rootNodeId: z.string().optional(),
-      maxDepth: z.number().int().min(0).optional(),
+      maxDepth: z.number().int().min(0).optional().describe("Levels of children to expand. Default 3. Omit for compact overview."),
       excludeTypes: z.array(z.string()).optional(),
-      fields: z.array(z.string()).optional(),
-      includeHidden: z.boolean().optional()
+      fields: z.array(z.string()).optional().describe("Extra per-node fields. Add \"characters\" to include TEXT content."),
+      includeHidden: z.boolean().optional(),
+      verbose: z.boolean().optional().describe("Return the nested {..., children:[...]} tree instead of the flattened columnar table.")
     }
   },
-  async ({ rootNodeId, maxDepth, excludeTypes, fields, includeHidden }) => {
+  async ({ rootNodeId, maxDepth, excludeTypes, fields, includeHidden, verbose }) => {
     const result = await sendCommand("get_document_tree", { rootNodeId, maxDepth, excludeTypes, fields, includeHidden });
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    if (verbose || !result || !result.tree) {
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    }
+    const { tree, ...rest } = result;
+    const columnar = toColumnar(flattenCompactTree(tree, 0, []));
+    const payload = columnar ? { ...rest, ...columnar } : result;
+    return { content: [{ type: "text", text: JSON.stringify(payload) }] };
   }
 );
 
@@ -1235,13 +1359,13 @@ server.registerTool(
     title: "Read my design",
     description: "Get detailed node information about the current selection.",
     inputSchema: {
-      maxDepth: z.number().int().min(0).optional().describe("Limit how many levels of children to return. Omit for the full subtree."),
-      excludeTypes: z.array(z.string()).optional().describe("Node types to skip entirely, e.g. [\"VECTOR\", \"BOOLEAN_OPERATION\"], to cut noise from nested icon/vector artwork."),
-      fields: z.array(z.string()).optional().describe("Only return these top-level fields (plus id/name/type), e.g. [\"fills\"] or [\"characters\"]. Omit for the full field set.")
+      maxDepth: z.number().int().min(0).optional().describe("Levels of children to expand. Defaults to 0 (node itself)."),
+      excludeTypes: z.array(z.string()).optional().describe("Skip these node types, e.g. [\"VECTOR\"], to cut icon/vector noise."),
+      fields: z.array(z.string()).optional().describe("Only return these fields (plus id/name/type).")
     }
   },
   async ({ maxDepth, excludeTypes, fields }) => {
-    const result = await sendCommand("read_my_design", { maxDepth, excludeTypes, fields });
+    const result = await sendCommand("read_my_design", { maxDepth: maxDepth ?? 0, excludeTypes, fields });
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -1253,13 +1377,13 @@ server.registerTool(
     description: "Get detailed information about a specific node.",
     inputSchema: {
       nodeId: z.string(),
-      maxDepth: z.number().int().min(0).optional().describe("Limit how many levels of children to return. Omit for the full subtree."),
-      excludeTypes: z.array(z.string()).optional().describe("Node types to skip entirely, e.g. [\"VECTOR\", \"BOOLEAN_OPERATION\"], to cut noise from nested icon/vector artwork."),
-      fields: z.array(z.string()).optional().describe("Only return these top-level fields (plus id/name/type), e.g. [\"fills\"] or [\"characters\"]. Omit for the full field set.")
+      maxDepth: z.number().int().min(0).optional().describe("Levels of children to expand. Defaults to 0 (node itself)."),
+      excludeTypes: z.array(z.string()).optional().describe("Skip these node types, e.g. [\"VECTOR\"], to cut icon/vector noise."),
+      fields: z.array(z.string()).optional().describe("Only return these fields (plus id/name/type).")
     }
   },
   async ({ nodeId, maxDepth, excludeTypes, fields }) => {
-    const result = await sendCommand("get_node_info", { nodeId, maxDepth, excludeTypes, fields });
+    const result = await sendCommand("get_node_info", { nodeId, maxDepth: maxDepth ?? 0, excludeTypes, fields });
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -1271,13 +1395,13 @@ server.registerTool(
     description: "Get detailed information about multiple nodes by providing an array of node IDs.",
     inputSchema: {
       nodeIds: z.array(z.string()),
-      maxDepth: z.number().int().min(0).optional().describe("Limit how many levels of children to return. Omit for the full subtree."),
-      excludeTypes: z.array(z.string()).optional().describe("Node types to skip entirely, e.g. [\"VECTOR\", \"BOOLEAN_OPERATION\"], to cut noise from nested icon/vector artwork."),
-      fields: z.array(z.string()).optional().describe("Only return these top-level fields (plus id/name/type), e.g. [\"fills\"] or [\"characters\"]. Omit for the full field set.")
+      maxDepth: z.number().int().min(0).optional().describe("Levels of children to expand. Defaults to 0 (node itself)."),
+      excludeTypes: z.array(z.string()).optional().describe("Skip these node types, e.g. [\"VECTOR\"], to cut icon/vector noise."),
+      fields: z.array(z.string()).optional().describe("Only return these fields (plus id/name/type).")
     }
   },
   async ({ nodeIds, maxDepth, excludeTypes, fields }) => {
-    const result = await sendCommand("get_nodes_info", { nodeIds, maxDepth, excludeTypes, fields });
+    const result = await sendCommand("get_nodes_info", { nodeIds, maxDepth: maxDepth ?? 0, excludeTypes, fields });
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -1286,11 +1410,11 @@ server.registerTool(
   "get_selection_context",
   {
     title: "Get selection context",
-    description: "One-call bundle for the current selection: node info plus, for instances, main component id, component property definitions, current property values, and slots. Replaces the get_selection -> get_node_info -> get_component_property_definitions round-trip chain.",
+    description: "One-call bundle for the current selection: node info + (for instances) main component id, property definitions/values, slots. Use instead of chaining get_selection→get_node_info→get_component_property_definitions.",
     inputSchema: {
-      maxDepth: z.number().int().min(0).optional().describe("Limit how many levels of children to return per node. Defaults to 0 (the node itself only)."),
-      excludeTypes: z.array(z.string()).optional(),
-      fields: z.array(z.string()).optional().describe("Only return these top-level fields (plus id/name/type) in each node's info.")
+      maxDepth: z.number().int().min(0).optional().describe("Levels of children to expand. Defaults to 0 (node itself)."),
+      excludeTypes: z.array(z.string()).optional().describe("Skip these node types, e.g. [\"VECTOR\"], to cut noise."),
+      fields: z.array(z.string()).optional().describe("Only return these fields (plus id/name/type).")
     }
   },
   async ({ maxDepth, excludeTypes, fields }) => {
@@ -1303,7 +1427,7 @@ server.registerTool(
   "get_changes_since",
   {
     title: "Get changes since",
-    description: "Returns which nodes this bridge has mutated since a given sequence cursor, so the agent can re-read only what changed instead of the whole document. Pass the previous call's currentSeq back as sinceSeq to page forward. Cursor state lives in the MCP server process and resets when it restarts.",
+    description: "Return nodes this bridge mutated since a cursor (re-read only what changed, not the whole doc). Pass prior currentSeq as sinceSeq to page. Cursor resets when the MCP server restarts.",
     inputSchema: {
       sinceSeq: z.number().int().min(0).optional()
     }
@@ -1720,16 +1844,24 @@ server.registerTool(
   "scan_text_nodes",
   {
     title: "Scan text nodes",
-    description: "Scan text nodes with basic chunking support.",
+    description: "Scan text nodes with basic chunking support. Matches are returned as a columnar table: fields lists the column names and rows holds one array per node in the same order.",
     inputSchema: {
       rootNodeId: z.string().optional(),
       chunkSize: z.number().optional(),
-      offset: z.number().optional()
+      offset: z.number().optional(),
+      maxChars: z.number().int().min(0).optional().describe("Truncate each returned characters string to this many chars. Default 120. Pass a large value (e.g. 100000) for full text."),
+      verbose: z.boolean().optional().describe("Return items as an array of objects instead of the columnar fields/rows table.")
     }
   },
-  async ({ rootNodeId, chunkSize, offset }) => {
-    const result = await sendCommand("scan_text_nodes", { rootNodeId, chunkSize, offset });
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  async ({ rootNodeId, chunkSize, offset, maxChars, verbose }) => {
+    const result = await sendCommand("scan_text_nodes", { rootNodeId, chunkSize, offset, maxChars });
+    if (verbose || !result || !Array.isArray(result.items)) {
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    }
+    const { items, ...rest } = result;
+    const columnar = toColumnar(items);
+    const payload = columnar ? { ...rest, ...columnar } : result;
+    return { content: [{ type: "text", text: JSON.stringify(payload) }] };
   }
 );
 
@@ -1746,10 +1878,11 @@ server.registerTool(
       wholeWord: z.boolean().optional().describe("Ignored when useRegex is true."),
       allPages: z.boolean().optional().describe("Default false: only search the current page."),
       rootNodeId: z.string().optional().describe("Restrict the search to this node's subtree on the current page. Ignored on other pages when allPages is true."),
-      dryRun: z.boolean().optional().describe("Preview matches without writing changes.")
+      dryRun: z.boolean().optional().describe("Preview matches without writing changes."),
+      maxPreviewLength: z.number().int().min(0).optional().describe("Truncate before/after preview snippets in dryRun results. Default 200.")
     }
   },
-  async ({ query, replacement, useRegex, matchCase, wholeWord, allPages, rootNodeId, dryRun }) => {
+  async ({ query, replacement, useRegex, matchCase, wholeWord, allPages, rootNodeId, dryRun, maxPreviewLength }) => {
     const result = await sendCommand("find_and_replace_text", {
       query,
       replacement,
@@ -1758,7 +1891,8 @@ server.registerTool(
       wholeWord,
       allPages,
       rootNodeId,
-      dryRun
+      dryRun,
+      maxPreviewLength
     });
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
@@ -1985,14 +2119,17 @@ server.registerTool(
   "get_local_components",
   {
     title: "Get local components",
-    description: "Get information about local components, including id, name, type, description, publish key, and simplified component property definitions (for building library catalogs).",
+    description: "Get information about local components across all pages: id, name, type, description, publish key, and a property count. Returns a columnar table: fields lists the column names and rows holds one array per component. Pass includeProperties: true to also get simplified component property definitions (for building library catalogs).",
     inputSchema: {
-      includeComponentSets: z.boolean().optional()
+      includeComponentSets: z.boolean().optional(),
+      includeProperties: z.boolean().optional().describe("Include full componentPropertyDefinitions. Default false (returns propertyCount only) to keep output small."),
+      verbose: z.boolean().optional().describe("Return an array of objects instead of the columnar fields/rows table.")
     }
   },
-  async ({ includeComponentSets }) => {
-    const result = await sendCommand("get_local_components", { includeComponentSets });
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  async ({ includeComponentSets, includeProperties, verbose }) => {
+    const result = await sendCommand("get_local_components", { includeComponentSets, includeProperties });
+    const columnar = verbose ? null : toColumnar(result);
+    return { content: [{ type: "text", text: JSON.stringify(columnar || result) }] };
   }
 );
 
@@ -2327,17 +2464,60 @@ server.registerTool(
 );
 
 server.registerTool(
+  "find_nodes",
+  {
+    title: "Find nodes",
+    description: "Query the document for nodes matching a set of predicates, evaluated inside Figma so only matching rows come back (use this instead of reading a whole subtree and filtering). All predicates are optional and are ANDed together. Returns a columnar table: fields names the columns, rows holds one array per match, plus scanned/total/truncated counts. Examples: {types:[\"INSTANCE\"], mainComponentName:\"Button\", fillHex:\"#ff0000\"} finds red button instances; {missingFillStyle:true} finds hardcoded fills with no style or variable bound (design-system drift); {types:[\"INSTANCE\"], hasOverrides:true} finds overridden instances.",
+    inputSchema: {
+      types: z.array(z.string()).optional().describe("Node types to match, e.g. [\"INSTANCE\",\"TEXT\"]."),
+      name: z.string().optional().describe("Glob against the node name: * and ? wildcards, anchored (e.g. \"Button/*\")."),
+      nameRegex: z.string().optional().describe("Regex against the node name (unanchored). Use instead of name for complex patterns."),
+      textContains: z.string().optional().describe("Substring of a TEXT node's characters. Implies types:[\"TEXT\"]."),
+      fillHex: z.string().optional().describe("Match nodes with a SOLID fill of this hex, e.g. \"#ff0000\"."),
+      fillTolerance: z.number().optional().describe("0-1 RGB distance allowed around fillHex. Default 0 (exact). ~0.1 catches near shades."),
+      fillStyleId: z.string().optional().describe("Match nodes using this paint style id."),
+      textStyleId: z.string().optional().describe("Match nodes using this text style id."),
+      missingFillStyle: z.boolean().optional().describe("true = nodes with a solid fill but no paint style and no bound variable (hardcoded colors); false = the inverse."),
+      hasBoundVariable: z.boolean().optional().describe("true = nodes with any bound variable; false = nodes with none."),
+      boundVariableId: z.string().optional().describe("Match nodes bound to this specific variable id."),
+      hasOverrides: z.boolean().optional().describe("Instances only: true = has overrides, false = clean. Implies types:[\"INSTANCE\"]."),
+      mainComponentName: z.string().optional().describe("Instances only: substring of the main component's name. Implies types:[\"INSTANCE\"]."),
+      visible: z.boolean().optional().describe("Filter by visibility."),
+      matchCase: z.boolean().optional().describe("Case-sensitive name/text matching. Default false."),
+      rootNodeId: z.string().optional().describe("Restrict to this node's subtree on the current page."),
+      allPages: z.boolean().optional().describe("Search every page. Default false (current page only)."),
+      fields: z.array(z.string()).optional().describe("Extra per-match columns: fillHex, characters, boundVariableIds, or any node property (e.g. opacity)."),
+      limit: z.number().int().min(1).optional().describe("Max matches to return. Default 200, cap 1000."),
+      offset: z.number().int().min(0).optional().describe("Skip this many matches, for paging."),
+      verbose: z.boolean().optional().describe("Return an array of objects instead of the columnar fields/rows table.")
+    }
+  },
+  async (args) => {
+    const { verbose, ...query } = args || {};
+    const result = await sendCommand("find_nodes", query);
+    if (verbose || !result || !Array.isArray(result.items)) {
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    }
+    const { items, ...rest } = result;
+    const columnar = toColumnar(items);
+    return { content: [{ type: "text", text: JSON.stringify(columnar ? { ...rest, ...columnar } : result) }] };
+  }
+);
+
+server.registerTool(
   "scan_nodes_by_types",
   {
     title: "Scan nodes by types",
-    description: "Scan for nodes with specific types.",
+    description: "Scan for nodes with specific types. Returns a columnar table: fields lists the column names and rows holds one array per node. For anything more selective than a type filter, prefer find_nodes.",
     inputSchema: {
-      types: z.array(z.string())
+      types: z.array(z.string()),
+      verbose: z.boolean().optional().describe("Return an array of objects instead of the columnar fields/rows table.")
     }
   },
-  async ({ types }) => {
+  async ({ types, verbose }) => {
     const result = await sendCommand("scan_nodes_by_types", { types });
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    const columnar = verbose ? null : toColumnar(result);
+    return { content: [{ type: "text", text: JSON.stringify(columnar || result) }] };
   }
 );
 
@@ -2711,13 +2891,14 @@ server.registerTool(
   "list_variables",
   {
     title: "List variables",
-    description: "List local variables in the current file (optionally filtered by resolvedType).",
+    description: "List local variables in the current file (optionally filtered by resolvedType). Pass includeScopes: true to also return each variable's scopes.",
     inputSchema: {
-      resolvedType: z.string().optional()
+      resolvedType: z.string().optional(),
+      includeScopes: z.boolean().optional().describe("Include per-variable scopes arrays. Default false to keep output small.")
     }
   },
-  async ({ resolvedType }) => {
-    const result = await sendCommand("list_variables", { resolvedType });
+  async ({ resolvedType, includeScopes }) => {
+    const result = await sendCommand("list_variables", { resolvedType, includeScopes });
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -3068,30 +3249,6 @@ server.registerTool(
 );
 
 server.registerTool(
-  "figma_get_selection",
-  {
-    title: "Get current selection",
-    description: "Returns the currently selected nodes in the open Figma document."
-  },
-  async () => {
-    const result = await sendCommand("getSelection", {});
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
-  }
-);
-
-server.registerTool(
-  "figma_get_document_info",
-  {
-    title: "Get document info",
-    description: "Returns basic info about the currently open Figma document (name + current page)."
-  },
-  async () => {
-    const result = await sendCommand("getDocumentInfo", {});
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
-  }
-);
-
-server.registerTool(
   "figma_set_text",
   {
     title: "Set text",
@@ -3103,85 +3260,6 @@ server.registerTool(
   },
   async ({ nodeId, characters }) => {
     const result = await sendCommand("setText", { nodeId, characters });
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
-  }
-);
-
-server.registerTool(
-  "figma_create_frame",
-  {
-    title: "Create frame",
-    description: "Creates a frame on the current page.",
-    inputSchema: {
-      name: z.string().optional(),
-      x: z.number().optional(),
-      y: z.number().optional(),
-      width: z.number().optional(),
-      height: z.number().optional()
-    }
-  },
-  async ({ name, x, y, width, height }) => {
-    const result = await sendCommand("createFrame", { name, x, y, width, height });
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
-  }
-);
-
-server.registerTool(
-  "figma_create_rectangle",
-  {
-    title: "Create rectangle",
-    description: "Creates a rectangle on the current page.",
-    inputSchema: {
-      name: z.string().optional(),
-      x: z.number().optional(),
-      y: z.number().optional(),
-      width: z.number().optional(),
-      height: z.number().optional()
-    }
-  },
-  async ({ name, x, y, width, height }) => {
-    const result = await sendCommand("createRectangle", { name, x, y, width, height });
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
-  }
-);
-
-server.registerTool(
-  "figma_create_text",
-  {
-    title: "Create text",
-    description: "Creates a text node on the current page.",
-    inputSchema: {
-      characters: z.string(),
-      name: z.string().optional(),
-      x: z.number().optional(),
-      y: z.number().optional(),
-      fontSize: z.number().optional()
-    }
-  },
-  async ({ characters, name, x, y, fontSize }) => {
-    const result = await sendCommand("createText", {
-      characters,
-      name,
-      x,
-      y,
-      fontSize
-    });
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
-  }
-);
-
-server.registerTool(
-  "figma_rename_node",
-  {
-    title: "Rename node",
-    description: "Renames a node by nodeId.",
-    inputSchema: {
-      nodeId: z.string(),
-      name: z.string()
-    }
-  },
-  async ({ nodeId, name }) => {
-    const result = await sendCommand("renameNode", { nodeId, name });
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -4173,6 +4251,8 @@ async function main() {
   }
 
   const transport = new StdioServerTransport();
+  const originalSend = transport.send.bind(transport);
+  transport.send = (message, options) => originalSend(slimToolListPayload(message), options);
   await server.connect(transport);
   console.error(
     JSON.stringify(

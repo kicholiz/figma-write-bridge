@@ -8,7 +8,7 @@ description: "Controls an open Figma file through the local figma-write-bridge M
 Use this skill when the user wants you to read from, generate into, or modify an open Figma file through the local `figma-write-bridge` plugin and MCP server.
 
 This skill is for local Figma editing, not code generation. It assumes:
-- The Figma Desktop app is open.
+- The Figma Desktop app is open (the plugin connects to the bridge over a local `ws://localhost` WebSocket, which only works in the Desktop app, not a browser tab).
 - The `Figma Write Bridge (Local)` development plugin is running in the target file.
 - The plugin UI is connected to the local bridge WebSocket.
 - The agent has access to the bridge MCP tools.
@@ -49,7 +49,7 @@ Target-frame enforcement:
 
 Before any editing session, verify:
 1. The bridge is reachable with `figma_bridge_status`.
-2. The expected channel is active. Use `join_channel` if needed.
+2. The expected channel is active (defaults to `default`; matches the server's `FIGMA_BRIDGE_CHANNEL`). Use `figma_bridge_status` to see it and `join_channel` if needed.
 3. The correct Figma file is open via `get_document_info` or `figma_get_document_info`.
 4. The user’s intended frame is selected, or you can identify it from the document.
 5. You have a clear parent/container before creating nodes.
@@ -58,16 +58,33 @@ If the bridge is not connected, tell the user to:
 1. Start the local server or MCP server for `figma-write-bridge`.
 2. Open the target Figma file.
 3. Run `Figma Write Bridge (Local)`.
-4. Connect the plugin UI to `ws://127.0.0.1:8787` or the configured port.
+4. Connect the plugin UI to `ws://localhost:8787` or the configured port — or pick the matching entry from the plugin's **Discovered servers** dropdown (it scans localhost ports `8787–8797` for running servers, one per agent).
 5. Confirm the plugin shows `Connected`.
+
+## Channels (One Plugin = One Channel / MCP Server)
+
+A “channel” is the name that ties a plugin UI to the MCP server it routes through:
+
+- By default the channel is `default` — on both the server and the plugin UI. A single server needs nothing else.
+- The server's channel is fixed at startup by the `FIGMA_BRIDGE_CHANNEL` env var (default `default`). This is what lets you run **multiple MCP servers**, each on its own `FIGMA_BRIDGE_PORT` + `FIGMA_BRIDGE_CHANNEL`, each controlling its own Figma file.
+- In the plugin UI, the **Channel** field defaults to `default`. If the user started a server with a non-default `FIGMA_BRIDGE_CHANNEL`, they type that same channel in the plugin UI (plus the matching host:port) so the plugin joins the right server. One plugin UI connects to exactly one channel / MCP server.
+- To discover running servers, the plugin scans localhost ports `8787–8797` (`GET /health` on each port; server answers with `{ name: "figma-write-bridge", wsUrl, host, port, channel, connectedChannels }`). Running servers appear in the **Discovered servers** dropdown — selecting one auto-fills **Server** + **Channel** and connects. Keep each agent's `FIGMA_BRIDGE_PORT` inside `8787–8797` so it shows up; the scan range is tunable via `scanPortStart`/`scanPortCount` at the top of `figma-plugin/code.js`.
+- The server targets the channel configured at startup. A plugin that joined that channel is the one your commands act on.
+
+So the routing rule is: **the channel in the plugin UI must equal the `FIGMA_BRIDGE_CHANNEL` of the MCP server it's connected to** (both `default` when unset). You can see the active channel via `figma_bridge_status`, switch it with `join_channel`, and list all connected channels with `list_channels`.
 
 ## Component & Variable Library Files
 
-To avoid re-reading the full component/variable catalog from Figma on every request (each `get_local_components`, `get_styles`, or `list_variables` round-trip costs tokens), this skill maintains two local catalog files in the project root: `component-library.md` and `variable-library.md`.
+To avoid re-reading the full component/variable catalog from Figma on every request (each `get_local_components`, `get_styles`, or `list_variables` round-trip costs tokens), this skill maintains per-file catalog files under `libraries/<fileKey>/` in the project root (where `fileKey` comes from the Figma URL — the segment after `/design/` or `/file/`):
+
+- `libraries/<fileKey>/component-library.md`
+- `libraries/<fileKey>/variable-library.md` (plus any `<collection>.md` split files it points to)
+
+`libraries/index.md` maps each file key to its file name/channel (the channel is the one of the MCP server that file is reached through — `default` by default) and library paths. **Read only the libraries for the file you are currently working in** — confirm the file with `get_document_info` (returns `fileKey`) or `figma_bridge_status`, then read `libraries/<fileKey>/...`. Never use another file's catalog.
 
 ### First use in a file
 
-Before the first read/write of a session, check whether `component-library.md` and `variable-library.md` already exist in the project root.
+Before the first read/write of a session, get the current file's key (via `figma_bridge_status` or `get_document_info`) and check whether `libraries/<fileKey>/component-library.md` and `libraries/<fileKey>/variable-library.md` already exist.
 
 If they do **not** exist yet, this is the first time the plugin is being used against this Figma file. Build them now:
 
@@ -75,7 +92,7 @@ If they do **not** exist yet, this is the first time the plugin is being used ag
 2. If you don't already know the Figma file's URL (needed to build component links), ask the user for it once. Extract the file key from the URL (the segment after `/design/` or `/file/`).
 3. Call `get_local_components` to enumerate every component and component set in the file (this also returns `description`, `key`, and simplified `componentPropertyDefinitions` — no extra per-component calls needed).
 4. For each component/component set, record: name, type (`COMPONENT` or `COMPONENT_SET`), node id, description if available, its property names/types (from `componentPropertyDefinitions`, omit if none), and a direct Figma URL built as `https://www.figma.com/design/<fileKey>/<file-name>?node-id=<nodeId with ":" replaced by "-">`.
-5. Write `component-library.md` as a Markdown table:
+5. Write `libraries/<fileKey>/component-library.md` as a Markdown table:
 
    ```markdown
    # Component Library — <file name>
@@ -88,7 +105,7 @@ If they do **not** exist yet, this is the first time the plugin is being used ag
    The Properties column is a cache of `componentPropertyDefinitions` — read it instead of calling `get_component_property_definitions` or `get_instance_properties` again just to learn what properties a component exposes. Only call those tools live when you need an instance's *current* values, not its schema.
 
 6. Call `list_variable_collections` and `list_variables` to enumerate every variable.
-7. Write `variable-library.md` as a Markdown table, grouped by collection:
+7. Write `libraries/<fileKey>/variable-library.md` as a Markdown table, grouped by collection:
 
    ```markdown
    # Variable Library — <file name>
@@ -102,22 +119,22 @@ If they do **not** exist yet, this is the first time the plugin is being used ag
 
    If the file has many variables, split this by collection instead of one giant file — see "Capping large libraries" below.
 
-8. Tell the user both files were created and will be used going forward instead of re-scanning the file.
+8. Add (or update) the row for this file in `libraries/index.md`, then tell the user the library files were created and will be used going forward instead of re-scanning the file.
 
 If a component genuinely has no `description` exposed by the tooling, leave that cell blank rather than guessing.
 
 ### Capping large libraries
 
 Large design systems can blow the same token budget this skill is trying to save. Apply these caps when building or refreshing either file:
-- If `variable-library.md` would exceed roughly 150 variable rows total, split it per collection into `variable-library.<collection-slug>.md` files instead of one file, and leave a short index in `variable-library.md` listing each collection file and its row count.
-- If `component-library.md` would exceed roughly 100 rows, group it into sections by page or by name prefix (e.g. `## Atoms`, `## Molecules`) within the same file rather than splitting into multiple files — components are looked up by name/type more often than filtered by collection, so one indexed file stays more useful.
+- If `libraries/<fileKey>/variable-library.md` would exceed roughly 150 variable rows total, split it per collection into `libraries/<fileKey>/variable-library.<collection-slug>.md` files instead of one file, and leave a short index in `libraries/<fileKey>/variable-library.md` listing each collection file and its row count.
+- If `libraries/<fileKey>/component-library.md` would exceed roughly 100 rows, group it into sections by page or by name prefix (e.g. `## Atoms`, `## Molecules`) within the same file rather than splitting into multiple files — components are looked up by name/type more often than filtered by collection, so one indexed file stays more useful.
 - When reading a split library back, only read the specific collection/section file relevant to the current task, not every file.
 
 ### Reconcile / prune (trigger: "update library")
 
 The library files only ever get appended to during normal work, so they can drift from the live file (renamed, deleted, or orphaned entries). When the user's message contains phrasing like "update library", "refresh library", or "sync library":
 1. Re-run `get_local_components` and `list_variable_collections`/`list_variables` fully.
-2. Diff the live results against the existing `component-library.md` / `variable-library.md` rows by id.
+2. Diff the live results against the existing `libraries/<fileKey>/component-library.md` / `libraries/<fileKey>/variable-library.md` rows by id.
 3. Remove rows whose id no longer exists live; update rows whose name/description/properties/value changed; add rows that are new.
 4. Rewrite the file(s) with the reconciled table(s) — don't just append.
 5. Report a one-line diff summary to the user (e.g. "removed 2 stale components, updated 1 description, added 3 new variables") rather than re-printing the whole table.
@@ -126,27 +143,27 @@ Do not run this reconcile pass automatically on every turn — only on the expli
 
 ### Every subsequent use
 
-If `component-library.md` and/or `variable-library.md` already exist:
+If `libraries/<fileKey>/component-library.md` and/or `libraries/<fileKey>/variable-library.md` already exist for the current file:
 - Read them directly (a plain file read) instead of calling `get_local_components`, `get_styles`, or `list_variables` to answer "what components/variables exist" questions.
 - Only fall back to the live tools when:
   - a lookup in the library file misses (see "Component not found" below),
   - the user says the file's components/variables changed, or
   - the library file looks stale/empty relative to what's on canvas.
 - When a live refresh is needed, only re-scan what changed if possible; otherwise re-run the full build steps above and overwrite the corresponding file.
-- Whenever you create a new component, style, or variable, append the new entry to the relevant library file immediately so it stays in sync without a full re-scan next time.
+- Whenever you create a new component, style, or variable, append the new entry to the relevant `libraries/<fileKey>/` file immediately so it stays in sync without a full re-scan next time.
 
 ### Component not found
 
-If the user asks to use or place a component by name and it is not present in `component-library.md` (or, if no library file exists yet, not found via `get_local_components`):
+If the user asks to use or place a component by name and it is not present in `libraries/<fileKey>/component-library.md` (or, if no library file exists yet, not found via `get_local_components`):
 - Do not silently substitute a plain frame/rectangle for it.
 - Ask the user: "I couldn't find a '<name>' component in this file. Would you like me to create it as a new component?"
 - Only proceed to `create_component` / `create_component_from_node` / `combine_as_variants` after they confirm.
-- After creating it, append the new entry to `component-library.md` right away.
+- After creating it, append the new entry to `libraries/<fileKey>/component-library.md` right away.
 
 ## Standard Workflow
 
 ### 0. Load Local Catalogs
-- Check for `component-library.md` and `variable-library.md` in the project root.
+- Get the current file's key (`figma_bridge_status` / `get_document_info`), then check for `libraries/<fileKey>/component-library.md` and `libraries/<fileKey>/variable-library.md`.
 - If present, read them now for context before making any Figma calls.
 - If absent, follow "First use in a file" above once preflight succeeds.
 
@@ -157,7 +174,7 @@ Run this fully only once per session (or after a reconnect):
 - `get_selection` or `figma_get_selection`
 
 If multiple files may be open:
-- confirm the correct channel
+- confirm the correct channel (it must match the `FIGMA_BRIDGE_CHANNEL` of the MCP server you're using — `default` unless overridden)
 - call `join_channel` before editing
 
 Once bridge, channel, and file have been confirmed successfully earlier in the same session, do not re-run `figma_bridge_status` or `get_document_info` before every subsequent message — reuse what you already know. Only re-check when:
@@ -180,7 +197,7 @@ If no frame exists yet:
 Even after `set_target_frame`, still manually avoid touching unrelated nodes.
 
 ### 3. Inspect Before Editing
-Check `component-library.md` / `variable-library.md` first for anything about known components, styles, or variables — only fall back to live tools for what those files don't answer:
+Check `libraries/<fileKey>/component-library.md` / `libraries/<fileKey>/variable-library.md` first for anything about known components, styles, or variables — only fall back to live tools for what those files don't answer:
 - `get_all_pages` once when you need a map of the whole file, or `get_document_tree` (with `maxDepth`/`excludeTypes`) to read an entire page/frame's structure and text in one compact call instead of many node reads
 - `read_my_design` for rich details on the current selection (pass `maxDepth`/`excludeTypes` to limit the read)
 - `get_node_info` for a single node
@@ -208,16 +225,33 @@ After edits:
 ## Tool Guide
 
 ### Core Status And Routing
-- `figma_bridge_status`: confirm the bridge is connected
-- `join_channel`: switch to a different connected Figma file/channel
+- `figma_bridge_status`: confirm the bridge is connected; reports the active channel (the server's `FIGMA_BRIDGE_CHANNEL`, `default` unless overridden) and every connected channel with its `fileKey`/`fileName`
+- `join_channel`: switch the active channel to a different connected Figma file/channel (channel names come from `figma_bridge_status`)
 - `list_channels`: dashboard of every connected plugin channel with its fileKey/fileName and connection time (useful when several files are open)
+
+### Columnar results
+
+Five bulk reads — `get_document_tree`, `scan_text_nodes`, `scan_nodes_by_types`, `get_local_components`, and `find_nodes` — return a **columnar table** instead of an array of objects, which cuts ~30% of the tokens on large results:
+
+```json
+{ "fields": ["depth", "id", "name", "type"],
+  "rows": [[0, "0:1", "Page 1", "PAGE"],
+           [1, "1:2", "Hero", "FRAME"]] }
+```
+
+`fields` names the columns; each entry in `rows` lines up with it positionally. A missing value is `null`.
+
+For `get_document_tree` the rows are a **pre-order traversal** with a `depth` column: `depth: 0` is the root, and each row is a child of the nearest preceding row with `depth - 1`. This reconstructs the nesting exactly — no `children` arrays needed.
+
+Pass `verbose: true` to any of the four to get the original array-of-objects (or nested tree) shape back.
 
 ### Read / Inspect
 - `get_document_info`
-- `get_all_pages` — compact map of every page and its top-level frames (id/name/type/childCount). Call once for a full-file overview.
-- `get_document_tree` — compact structural tree of the whole file (or one subtree). Every node is `{id, name, type}` and TEXT nodes include their characters by default, so this is the cheapest way to get the file's full context in one call. Use `rootNodeId` to scope to a frame/page, `maxDepth` to cap expansion, `excludeTypes: ["VECTOR"]` to drop icon/vector noise, and `fields` to pull extra per-node values (e.g. `["fills","absoluteBoundingBox"]`) only when you need them.
+- `get_all_pages` — compact map of every page (id/name/childCount). Pass `includeTopLevel: true` to also list each page's top-level frames. Call once for a full-file overview.
+- `get_document_tree` — compact structural tree of the whole file (or one subtree). Every node is `{id, name, type}`; no extra fields unless requested. Default `maxDepth` is 3 to bound output; pass `fields: ["characters"]` to include TEXT content and a larger `maxDepth` for deeper expansion. Use `rootNodeId` to scope to a frame/page, `excludeTypes: ["VECTOR"]` to drop icon/vector noise, and `fields` to pull extra per-node values (e.g. `["fills","absoluteBoundingBox"]`) only when you need them. Returns a **columnar table** — see below.
 - `get_selection`
 - `get_selection_context` — bundles selection + node info + (for instances) main component id, property definitions, current property values, and slots in one call. Prefer this over chaining `get_selection` → `get_node_info` → `get_component_property_definitions` when you need more than just id/name/type.
+- `find_nodes` — server-side predicate query; the node graph is filtered inside Figma and only matches come back, so "all red button instances" or "all hardcoded fills with no style" costs a handful of rows instead of a full tree dump filtered in context. Predicates (all optional, ANDed): `types`, `name` (glob), `nameRegex`, `textContains`, `fillHex` (+ `fillTolerance` for near-shades), `fillStyleId`, `textStyleId`, `missingFillStyle` (hardcoded color with no style/variable — design-system drift), `hasBoundVariable`/`boundVariableId`, `hasOverrides`/`mainComponentName` (instances), `visible`, `rootNodeId`, `allPages`. Paginate with `limit`/`offset`; `total`/`truncated` reflect the full match count, not just the returned page. Prefer this over `scan_nodes_by_types` or `get_document_tree` + manual filtering whenever the query is more selective than "give me every node of type X".
 - `read_my_design`
 - `get_node_info`
 - `get_nodes_info`
@@ -407,7 +441,7 @@ Avoid creating replacement text layers if existing text nodes can be updated saf
 
 ### For component-based design systems
 Prefer:
-- checking `component-library.md` first for the component's id/key/url before calling any live lookup tool
+- checking `libraries/<fileKey>/component-library.md` first for the component's id/key/url before calling any live lookup tool
 - `get_selection_context` when the user is pointing at something already selected in Figma and you need its full editable surface (properties, slots, bound properties) in one call
 - `scan_instances_with_sources`
 - `get_instance_source`
@@ -416,7 +450,7 @@ Prefer:
 - `set_instance_properties`
 - `create_component_slot` / `edit_component_slot` / `delete_component_slot` for authoring SLOT properties on a component; `get_instance_slots` / `append_to_slot` for filling them on an instance
 
-Avoid detaching or rebuilding instances unless the user explicitly asks. If a named component isn't in `component-library.md` or on canvas, ask the user before creating it (see "Component not found" above).
+Avoid detaching or rebuilding instances unless the user explicitly asks. If a named component isn't in `libraries/<fileKey>/component-library.md` or on canvas, ask the user before creating it (see "Component not found" above).
 
 ### For layout work
 Prefer:
@@ -435,7 +469,7 @@ Prefer:
 - `create_typography_scale` to build the type ramp instead of dozens of `create_text_style` calls
 - `import_tokens` to apply a full W3C token spec (colors → variables + paint styles), or `export_tokens` to snapshot the file's variables as tokens JSON
 - `extract_component_set` to turn existing frames into a variant component set, then `add_component_property` / `set_variant_properties` to author variant properties
-- update `variable-library.md` and `component-library.md` after these tools create new variables/styles/components
+- update `libraries/<fileKey>/variable-library.md` and `libraries/<fileKey>/component-library.md` after these tools create new variables/styles/components
 
 ### For multi-step edits
 When a request decomposes into more than ~3 independent bridge calls (e.g. "make all 5 buttons in this row the same fill and corner radius"), prefer one `run_batch` call over 5 separate tool calls — it's one WebSocket round trip instead of five, and you still get a per-step result/error back. For edits with meaningful blast radius on existing nodes, call `create_checkpoint` on the affected nodeIds first so you have a `restore_checkpoint` fallback if the batch produces something the user doesn't want. For quick single property edits, `undo` / `redo` can reverse the last action without a checkpoint, but don't rely on it across a long batch — checkpoints are the durable restore path.
@@ -451,7 +485,7 @@ Smart Animate itself has no scriptable keyframe/timeline API to call into — it
 
 ### For styling
 Prefer:
-- checking `variable-library.md` first for existing tokens before calling `list_variables` or `get_styles`
+- checking `libraries/<fileKey>/variable-library.md` first for existing tokens before calling `list_variables` or `get_styles`
 - applying existing styles and variables before creating new local styles
 - `apply_*_style` when a matching style already exists
 - variable binding when the file uses variables semantically
@@ -494,7 +528,7 @@ when the user clearly asked for removal or reset-like behavior.
 ## Recommended Interaction Pattern
 
 Use this sequence for most editing tasks:
-1. Load `component-library.md` / `variable-library.md` if present, or build them on first use.
+1. Load the current file's `libraries/<fileKey>/component-library.md` / `libraries/<fileKey>/variable-library.md` if present, or build them on first use.
 2. Confirm bridge and file with `figma_bridge_status` and `get_document_info` — skip this step if already confirmed earlier in the session (see Preflight).
 3. Confirm selection with `get_selection`.
 4. Set scope with `set_target_frame`.
@@ -558,6 +592,8 @@ Large tool results (a big `read_my_design` subtree, `scan_text_nodes` over hundr
 - When reporting results to the user, summarize (counts, names, what changed) instead of pasting raw JSON.
 - Never echo a full component/variable library table back to the user after reading it — you already have it; just use it.
 - If you need the same raw data again later in the same task, prefer re-deriving the small piece you need (e.g. `get_node_info` on one id) over re-reading the full original dump from earlier in the conversation.
+
+Tool results are capped at 50KB (~12k tokens); past that they are truncated with a `[TRUNCATED: ...]` marker. Treat a truncated result as a signal to narrow the request (`maxDepth`, `chunkSize`/`offset`, `rootNodeId`, `excludeTypes`, `maxChars`) rather than to retry it unchanged. Override the cap with `FIGMA_BRIDGE_MAX_RESULT_BYTES` if a single large read is genuinely needed.
 
 ## Output Expectations
 

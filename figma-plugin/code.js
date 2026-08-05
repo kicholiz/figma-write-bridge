@@ -1,4 +1,28 @@
-const defaultWsUrl = "ws://127.0.0.1:8787";
+// Defaults mirror the MCP server's documented env in README.md:
+//   FIGMA_BRIDGE_HOST = 127.0.0.1
+//   FIGMA_BRIDGE_PORT = 8787
+//   FIGMA_BRIDGE_CHANNEL = default
+//
+// The host here is deliberately "localhost", not "127.0.0.1", even though the
+// server binds to 127.0.0.1: Figma's manifest validator rejects raw IP
+// addresses in networkAccess.allowedDomains ("must be a valid URL"), and every
+// localhost example in Figma's docs uses the hostname. Both resolve to the same
+// loopback interface, so connecting by name matches the allowlist and reaches
+// the same server. normalizeServerUrl() rewrites any 127.0.0.1 the user types.
+const defaultHost = "localhost";
+const defaultPort = "8787";
+const defaultChannel = "default";
+const defaultWsUrl = `ws://${defaultHost}:${defaultPort}`;
+const defaultHostPort = `${defaultHost}:${defaultPort}`;
+
+// Server discovery: the plugin probes this localhost port range for running
+// figma-write-bridge MCP servers (GET /health) so the user can pick which AI
+// agent's server to connect to from a dropdown. Covers the documented default
+// 8787 plus ~10 extra agent ports; each agent's server should use a distinct
+// FIGMA_BRIDGE_PORT inside this range.
+const scanPortStart = 8787;
+const scanPortCount = 11;
+const scanTimeoutMs = 400;
 
 const uiHtml = `<!doctype html>
 <html>
@@ -6,101 +30,298 @@ const uiHtml = `<!doctype html>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <style>
+      :root {
+        --bg: #1e1e1e;
+        --panel: #2c2c2c;
+        --panel-2: #333333;
+        --border: #3d3d3d;
+        --text: #e8e8e8;
+        --text-dim: #9a9a9a;
+        --accent: #0d99ff;
+        --accent-hover: #35aaff;
+        --green: #1fc76e;
+        --amber: #f5c451;
+        --red: #f24822;
+        --radius: 8px;
+      }
+      * { box-sizing: border-box; }
       body {
+        margin: 0;
         font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-        margin: 12px;
-        color: #111;
+        background: var(--bg);
+        color: var(--text);
+        font-size: 12px;
+        -webkit-font-smoothing: antialiased;
       }
-      .row {
-        display: flex;
-        gap: 8px;
-        align-items: center;
-        margin-bottom: 8px;
+      .app { padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+      .header { display: flex; align-items: center; gap: 10px; }
+      .logo {
+        width: 30px; height: 30px; border-radius: 8px;
+        background: linear-gradient(135deg, #0d99ff, #6e56cf);
+        display: flex; align-items: center; justify-content: center;
+        color: #fff; font-weight: 700; font-size: 13px; flex-shrink: 0;
       }
+      .title { font-size: 14px; font-weight: 600; line-height: 1.2; }
+      .subtitle { font-size: 11px; color: var(--text-dim); }
+      .status-card {
+        background: var(--panel); border: 1px solid var(--border);
+        border-radius: var(--radius); padding: 10px 12px;
+        display: flex; align-items: flex-start; gap: 10px;
+      }
+      .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--text-dim); flex-shrink: 0; margin-top: 3px; }
+      .dot.ok { background: var(--green); box-shadow: 0 0 0 3px rgba(31,199,110,0.18); }
+      .dot.busy { background: var(--amber); box-shadow: 0 0 0 3px rgba(245,196,81,0.18); }
+      .dot.err { background: var(--red); box-shadow: 0 0 0 3px rgba(242,72,34,0.18); }
+      .status-text { font-weight: 500; line-height: 1.4; }
+      .status-detail { color: var(--text-dim); font-size: 11px; margin-top: 2px; line-height: 1.4; }
+      .field { display: flex; flex-direction: column; gap: 5px; }
+      .field label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; }
+      .hint { font-size: 10.5px; color: var(--text-dim); line-height: 1.4; }
       input {
-        flex: 1;
-        padding: 8px 10px;
-        border: 1px solid #ddd;
-        border-radius: 6px;
-        font-size: 12px;
+        width: 100%; padding: 8px 10px; border: 1px solid var(--border);
+        border-radius: 6px; background: var(--panel-2); color: var(--text);
+        font-size: 12px; outline: none; font-family: inherit;
       }
+      input:focus { border-color: var(--accent); }
+      select {
+        width: 100%; padding: 8px 10px; border: 1px solid var(--border);
+        border-radius: 6px; background: var(--panel-2); color: var(--text);
+        font-size: 12px; outline: none; font-family: inherit;
+      }
+      select:focus { border-color: var(--accent); }
+      .row { display: flex; gap: 8px; }
+      .row > * { flex: 1; min-width: 0; }
       button {
-        padding: 8px 10px;
-        border: 1px solid #ddd;
-        border-radius: 6px;
-        background: #fff;
-        font-size: 12px;
-        cursor: pointer;
+        padding: 8px 12px; border-radius: 6px; border: 1px solid var(--border);
+        background: var(--panel-2); color: var(--text); font-size: 12px;
+        font-weight: 500; cursor: pointer; font-family: inherit;
       }
-      button.primary {
-        background: #111;
-        border-color: #111;
-        color: #fff;
+      button:hover { background: #3a3a3a; }
+      button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+      button.primary:hover { background: var(--accent-hover); }
+      button.primary:disabled { opacity: 0.5; cursor: default; }
+      .log-wrap { border: 1px solid var(--border); border-radius: var(--radius); background: #141414; overflow: hidden; }
+      .log-head {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 8px 10px; border-bottom: 1px solid var(--border);
+        color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
       }
-      .status {
-        font-size: 12px;
-        padding: 6px 8px;
-        border: 1px solid #eee;
-        border-radius: 6px;
-        background: #fafafa;
-      }
+      .log-head button { border: none; background: none; color: var(--text-dim); padding: 2px 4px; font-size: 11px; }
+      .log-head button:hover { color: var(--text); background: none; }
       pre {
-        font-size: 11px;
-        line-height: 1.3;
-        padding: 8px;
-        border-radius: 6px;
-        border: 1px solid #eee;
-        background: #fafafa;
-        overflow: auto;
-        max-height: 130px;
+        margin: 0; padding: 10px; font-size: 11px; line-height: 1.4;
+        color: #b8b8b8; overflow: auto; max-height: 120px;
+        white-space: pre-wrap; word-break: break-word;
       }
     </style>
   </head>
   <body>
-    <div class="row">
-      <input id="wsUrl" />
-      <input id="channel" placeholder="Channel" />
+    <div class="app">
+      <div class="header">
+        <div class="logo">FW</div>
+        <div>
+          <div class="title">Figma Write Bridge</div>
+          <div class="subtitle">Local bridge plugin</div>
+        </div>
+      </div>
+
+      <div class="status-card">
+        <span id="dot" class="dot"></span>
+        <div style="flex: 1; min-width: 0;">
+          <div id="status" class="status-text">Disconnected</div>
+          <div id="statusDetail" class="status-detail"></div>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="serverList">Discovered servers</label>
+        <div class="row">
+          <select id="serverList">
+            <option value="">Scanning for local MCP servers…</option>
+          </select>
+          <button id="scan" style="flex: 0 0 auto; min-width: 62px;">Scan</button>
+        </div>
+        <div class="hint">Pick a running agent/MCP server to auto-fill and connect. Ports 8787–8797 are scanned.</div>
+      </div>
+
+      <div class="field">
+        <label for="wsUrl">Server (host:port)</label>
+        <input id="wsUrl" placeholder="localhost:8787" />
+        <div class="hint" id="wsHint"></div>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label for="channel">Channel</label>
+          <input id="channel" placeholder="default" />
+        </div>
+      </div>
+      <div class="row">
+        <button id="toggleConn" class="primary">Connect</button>
+      </div>
+      <div class="field">
+        <label>History</label>
+        <div class="row">
+          <button id="undo" disabled>&#8630; Undo</button>
+          <button id="redo" disabled>&#8631; Redo</button>
+        </div>
+        <div class="hint" id="historyHint">Nothing to undo yet.</div>
+      </div>
+      <div class="log-wrap">
+        <div class="log-head"><span>Activity log</span><button id="clearLog">Clear</button></div>
+        <pre id="log"></pre>
+      </div>
     </div>
-    <div class="row">
-      <input id="secret" type="password" placeholder="Secret (optional)" />
-    </div>
-    <div class="row">
-      <button id="connect" class="primary">Connect</button>
-      <button id="disconnect">Disconnect</button>
-    </div>
-    <div class="row">
-      <div id="status" class="status">Disconnected</div>
-    </div>
-    <pre id="log"></pre>
     <script>
       const wsUrlInput = document.getElementById("wsUrl");
       const channelInput = document.getElementById("channel");
-      const secretInput = document.getElementById("secret");
-      const connectBtn = document.getElementById("connect");
-      const disconnectBtn = document.getElementById("disconnect");
+      const toggleConnBtn = document.getElementById("toggleConn");
+      const clearLogBtn = document.getElementById("clearLog");
       const statusEl = document.getElementById("status");
+      const statusDetailEl = document.getElementById("statusDetail");
+      const dotEl = document.getElementById("dot");
       const logEl = document.getElementById("log");
+      const serverList = document.getElementById("serverList");
+      const scanBtn = document.getElementById("scan");
+      const undoBtn = document.getElementById("undo");
+      const redoBtn = document.getElementById("redo");
+      const historyHintEl = document.getElementById("historyHint");
 
-      wsUrlInput.value = "${defaultWsUrl}";
-      channelInput.value = "default";
-      secretInput.value = "";
+      wsUrlInput.value = "${defaultHostPort}";
+      channelInput.value = "${defaultChannel}";
+      setDetailHint();
 
       let ws = null;
       const pending = new Map();
       let manualDisconnect = false;
       let currentChannel = "default";
+      let currentUrl = "${defaultWsUrl}";
       let fileKeyInfo = null;
       let fileNameInfo = null;
       let reconnectDelayMs = 800;
       let reconnectTimer = null;
+      let connectionEpoch = 0;
+      const MAX_LOG_LINES = 30;
+      const MAX_PENDING = 200;
 
-      function setStatus(text) {
+      // "active" covers connecting / connected / reconnecting -- any state where
+      // clicking the button should stop/close rather than start a connection.
+      // It is the single source of truth for the merged Connect/Disconnect button.
+      let connectionActive = false;
+
+      function setStatus(text, kind, detail, active) {
         statusEl.textContent = text;
+        dotEl.className = "dot" + (kind ? " " + kind : "");
+        statusDetailEl.textContent = detail || "";
+        connectionActive = Boolean(active);
+        toggleConnBtn.textContent = connectionActive ? "Disconnect" : "Connect";
+        toggleConnBtn.className = connectionActive ? "" : "primary";
       }
 
       function log(data) {
-        const text = typeof data === "string" ? data : JSON.stringify(data, null, 2);
-        logEl.textContent = text;
+        const line = typeof data === "string" ? data : JSON.stringify(data);
+        const existing = logEl.textContent.split("\\n").filter(Boolean);
+        existing.push(line);
+        logEl.textContent = existing.slice(-MAX_LOG_LINES).join("\\n");
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      function connectedDetail() {
+        const parts = ["Server: " + currentUrl];
+        if (fileNameInfo) parts.push("File: " + fileNameInfo);
+        if (fileKeyInfo) parts.push("Key: " + fileKeyInfo);
+        return parts.join("  ·  ");
+      }
+
+      function setDetailHint() {
+        const el = document.getElementById("wsHint");
+        if (!el) return;
+        el.textContent =
+          "Default: ws://${defaultHostPort} · Channel: ${defaultChannel} · " +
+          "pick a server from Discovered servers or type a custom host:port";
+      }
+
+      // Servers discovered by the main thread (scanServers) and offered in the
+      // dropdown. Selecting one fills Server + Channel and connects.
+      let discoveredServers = [];
+
+      function serverLabel(server) {
+        let label = (server.channel || "default") + "  ·  " + (server.host || "localhost") + ":" + server.port;
+        const connected = Array.isArray(server.connectedChannels) ? server.connectedChannels : [];
+        const file = connected.length && connected[0].fileName ? String(connected[0].fileName) : null;
+        if (file) label += "  —  " + file;
+        return label;
+      }
+
+      function populateServers(servers) {
+        discoveredServers = Array.isArray(servers) ? servers : [];
+        serverList.textContent = "";
+        if (!discoveredServers.length) {
+          const opt = document.createElement("option");
+          opt.value = "";
+          opt.textContent = "No servers found on ports ${scanPortStart}–${scanPortStart + scanPortCount - 1}";
+          serverList.appendChild(opt);
+          return;
+        }
+        for (let i = 0; i < discoveredServers.length; i += 1) {
+          const opt = document.createElement("option");
+          opt.value = String(i);
+          opt.textContent = serverLabel(discoveredServers[i]);
+          serverList.appendChild(opt);
+        }
+      }
+
+      function requestScan() {
+        serverList.textContent = "";
+        const opt = document.createElement("option");
+        opt.value = "";
+        opt.textContent = "Scanning…";
+        serverList.appendChild(opt);
+        parent.postMessage({ pluginMessage: { type: "scanServers" } }, "*");
+      }
+
+      serverList.onchange = () => {
+        const raw = serverList.value;
+        if (raw === "") return;
+        const server = discoveredServers[Number(raw)];
+        if (!server) return;
+        wsUrlInput.value = (server.host || "localhost") + ":" + server.port;
+        channelInput.value = server.channel || "default";
+        connect();
+      };
+
+      scanBtn.onclick = requestScan;
+
+      // One plugin UI connects to exactly one channel / MCP server. The channel
+      // defaults to "default"; set it to the same value the MCP server was
+      // configured with (FIGMA_BRIDGE_CHANNEL) so this plugin routes to the
+      // right bridge. Leave "default" unchanged for a single-server setup.
+      function resolveChannel() {
+        return channelInput.value.trim() || "default";
+      }
+
+      function normalizeServerUrl(raw) {
+        const value = String(raw || "").trim();
+        if (!value) return "";
+        // Figma matches the live request URL against manifest allowedDomains,
+        // which cannot contain raw IPs — so a typed 127.0.0.1 must become
+        // localhost or the connection is blocked even though the server is up.
+        const named = value.replace(/(^|\\/\\/)127\\.0\\.0\\.1(?=[:\\/]|$)/, "$1localhost");
+        return /^wss?:\\/\\//i.test(named) ? named : "ws://" + named;
+      }
+
+      function sendJoin(socket) {
+        const target = socket || ws;
+        if (!target || target.readyState !== WebSocket.OPEN) return;
+        try {
+          target.send(
+            JSON.stringify({
+              type: "join",
+              channel: currentChannel,
+              fileKey: fileKeyInfo,
+              fileName: fileNameInfo
+            })
+          );
+        } catch (err) {}
       }
 
       function safeJsonParse(str) {
@@ -108,71 +329,98 @@ const uiHtml = `<!doctype html>
       }
 
       function connect() {
-        const url = wsUrlInput.value.trim();
-        const channel = channelInput.value.trim() || "default";
-        if (!url) return;
+        const url = normalizeServerUrl(wsUrlInput.value);
+        if (!url) {
+          setStatus("Disconnected", "err", "Enter a server address like localhost:8787", false);
+          return;
+        }
         manualDisconnect = false;
+        const epoch = ++connectionEpoch;
         if (reconnectTimer) {
           clearTimeout(reconnectTimer);
           reconnectTimer = null;
         }
-        if (ws) ws.close();
-        setStatus("Connecting...");
-        ws = new WebSocket(url);
-
-        ws.onopen = () => {
-          setStatus("Connected");
-          reconnectDelayMs = 800;
-          currentChannel = channelInput.value.trim() || "default";
-          try {
-            ws.send(
-              JSON.stringify({
-                type: "join",
-                channel: currentChannel,
-                secret: secretInput.value.trim(),
-                fileKey: fileKeyInfo,
-                fileName: fileNameInfo
-              })
-            );
-          } catch (err) {}
-          log({ connectedTo: url, channel: currentChannel });
-        };
-
-        ws.onclose = () => {
-          if (manualDisconnect) {
-            setStatus("Disconnected");
-          } else {
-            setStatus("Reconnecting...");
-            const nextDelay = reconnectDelayMs;
-            reconnectDelayMs = Math.min(5000, reconnectDelayMs * 2);
-            reconnectTimer = setTimeout(() => {
-              reconnectTimer = null;
-              connect();
-            }, nextDelay);
-          }
+        if (ws) {
+          const closing = ws;
           ws = null;
+          try { closing.close(); } catch (err) {}
+        }
+        currentUrl = url;
+        setStatus("Connecting...", "busy", "Server: " + url + " · Channel: " + resolveChannel(), true);
+        const socket = new WebSocket(url);
+        ws = socket;
+
+        socket.onopen = () => {
+          if (connectionEpoch !== epoch) return;
+          reconnectDelayMs = 800;
+          currentChannel = resolveChannel();
+          sendJoin(socket);
+          setStatus("Connected to server in channel: " + currentChannel, "ok", connectedDetail(), true);
+          log("Connected to " + currentUrl + " in channel: " + currentChannel);
         };
 
-        ws.onerror = () => {
-          setStatus("Error");
+        socket.onclose = (event) => {
+          if (connectionEpoch !== epoch) return;
+          if (ws === socket) ws = null;
+          if (manualDisconnect) {
+            setStatus("Disconnected", "err", "Server: " + currentUrl, false);
+            return;
+          }
+          const rejected = event && event.code === 1008;
+          setStatus("Reconnecting...", "busy", rejected ? "Connection rejected (check channel) — retrying" : "Attempt again in " + reconnectDelayMs + "ms", true);
+          const nextDelay = reconnectDelayMs;
+          reconnectDelayMs = Math.min(5000, reconnectDelayMs * 2);
+          reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            if (connectionEpoch === epoch) connect();
+          }, nextDelay);
         };
 
-        ws.onmessage = (event) => {
+        socket.onerror = () => {
+          if (connectionEpoch !== epoch) return;
+          setStatus("Error connecting", "err", "Is the server running on " + currentUrl + "?", true);
+          try { socket.close(); } catch (err) {}
+        };
+
+        socket.onmessage = (event) => {
           const msg = safeJsonParse(String(event.data));
-          if (!msg || msg.type !== "command" || typeof msg.id !== "string") return;
+          if (!msg) return;
+          if (msg.type === "system") {
+            if (msg.message) log("Server: " + msg.message);
+            if (msg.channel && ws === socket && currentChannel) {
+              setStatus("Connected to server in channel: " + msg.channel, "ok", connectedDetail(), true);
+            }
+            return;
+          }
+          if (msg.type !== "command" || typeof msg.id !== "string") return;
+          if (pending.size >= MAX_PENDING) pending.delete(pending.keys().next().value);
           pending.set(msg.id, true);
+          log("> " + msg.action);
           parent.postMessage({ pluginMessage: { type: "exec", id: msg.id, action: msg.action, payload: msg.payload } }, "*");
         };
       }
 
       function disconnect() {
-        if (!ws) return;
+        // No early return on "!ws": during the Reconnecting phase ws is already
+        // null (the previous socket closed) but a reconnect is still scheduled
+        // via reconnectTimer, so this must still cancel that retry.
         manualDisconnect = true;
+        connectionEpoch += 1;
         if (reconnectTimer) {
           clearTimeout(reconnectTimer);
           reconnectTimer = null;
         }
-        ws.close();
+        if (ws) {
+          const closing = ws;
+          ws = null;
+          try { closing.close(); } catch (err) {}
+        }
+        setStatus("Disconnected", "err", "Server: " + currentUrl, false);
+      }
+
+      function toggleConnection() {
+        if (connectionActive) disconnect();
+        else connect();
       }
 
       window.onmessage = (event) => {
@@ -181,6 +429,15 @@ const uiHtml = `<!doctype html>
         if (msg.type === "meta") {
           fileKeyInfo = msg.fileKey || null;
           fileNameInfo = msg.fileName || null;
+          // The channel is whatever the user set (defaults to "default") so
+          // this plugin stays bound to one channel / MCP server.
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            currentChannel = resolveChannel();
+            // Always re-join so the server gets fresh fileKey/fileName even when
+            // the channel did not change (e.g. it resolved to "default").
+            sendJoin(ws);
+            setStatus("Connected to server in channel: " + currentChannel, "ok", connectedDetail(), true);
+          }
           return;
         }
         if (msg.type === "targetFrames") {
@@ -195,23 +452,65 @@ const uiHtml = `<!doctype html>
           }
           return;
         }
+        if (msg.type === "servers") {
+          populateServers(msg.servers);
+          return;
+        }
+        // Undo/redo history is owned by the plugin's main thread, so the same
+        // stack covers both agent edits and these buttons.
+        if (msg.type === "undoState") {
+          undoBtn.disabled = !msg.undoDepth;
+          redoBtn.disabled = !msg.redoDepth;
+          if (msg.undoDepth) {
+            historyHintEl.textContent =
+              "Next undo: " + (msg.undoLabel || "last change") + "  ·  " + msg.undoDepth + " step(s) available";
+          } else if (msg.redoDepth) {
+            historyHintEl.textContent = "Nothing to undo. Next redo: " + (msg.redoLabel || "last change");
+          } else {
+            historyHintEl.textContent = "Nothing to undo yet.";
+          }
+          return;
+        }
+        if (msg.type === "localResult") {
+          log(msg.ok ? "< " + msg.action + " ok" : "< " + msg.action + " error: " + (msg.error || ""));
+          return;
+        }
         if (msg.type !== "result" || typeof msg.id !== "string") return;
         if (!pending.has(msg.id)) return;
         pending.delete(msg.id);
         if (ws && ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: "result", id: msg.id, ok: msg.ok, result: msg.result, error: msg.error }));
         }
-        log(msg);
+        log(msg.ok ? "< " + msg.action + " ok" : "< " + msg.action + " error: " + (msg.error || ""));
       };
 
-      connectBtn.onclick = connect;
-      disconnectBtn.onclick = disconnect;
-      connect();
+      toggleConnBtn.onclick = toggleConnection;
+      clearLogBtn.onclick = () => { logEl.textContent = ""; };
+      undoBtn.onclick = () => {
+        undoBtn.disabled = true;
+        log("> undo (from plugin UI)");
+        parent.postMessage({ pluginMessage: { type: "localUndo" } }, "*");
+      };
+      redoBtn.onclick = () => {
+        redoBtn.disabled = true;
+        log("> redo (from plugin UI)");
+        parent.postMessage({ pluginMessage: { type: "localRedo" } }, "*");
+      };
+      // Ask for the current depths on load so the buttons start in the right state.
+      parent.postMessage({ pluginMessage: { type: "undoState" } }, "*");
+      // Auto-connect on load using the prepopulated default values. If it fails
+      // to reach the server, the onclose handler keeps retrying automatically.
+      try {
+        connect();
+      } catch (err) {
+        setStatus("Disconnected", "err", "Auto-connect error: " + (err && err.message ? err.message : String(err)), false);
+        log("Auto-connect error: " + (err && err.message ? err.message : String(err)));
+      }
     </script>
   </body>
 </html>`;
 
-figma.showUI(uiHtml, { width: 420, height: 275 });
+figma.showUI(uiHtml, { width: 380, height: 545 });
 
 // File identity is reported to the UI (which holds the WebSocket) so the bridge
 // server can surface which file each channel is connected to (channel dashboard).
@@ -221,6 +520,65 @@ try {
     fileKey: typeof figma.fileKey === "string" ? figma.fileKey : null,
     fileName: figma.root ? String(figma.root.name) : null
   });
+} catch (_err) {}
+
+// ---------------------------------------------------------------------------
+// Server discovery
+// ---------------------------------------------------------------------------
+// scanServers probes the localhost scan range for running figma-write-bridge
+// MCP servers (each agent runs its own on a distinct FIGMA_BRIDGE_PORT), then
+// posts the list to the UI so the user can pick one from a dropdown and connect.
+// Probing runs in the main thread (which has fetch) and relays via postMessage.
+
+// The server binds and advertises 127.0.0.1, but Figma's manifest allowlist
+// cannot contain raw IPs, so every host the UI connects to must be the
+// loopback *name*. Non-loopback hosts are left alone.
+function connectableHost(host) {
+  const value = String(host || "").trim();
+  if (!value || value === "127.0.0.1" || value === "::1" || value === "0.0.0.0") return defaultHost;
+  return value;
+}
+
+async function probeHealth(port) {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), scanTimeoutMs);
+    const res = await fetch(`http://${defaultHost}:${port}/health`, { signal: controller.signal });
+    clearTimeout(timer);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data || data.name !== "figma-write-bridge") return null;
+    const host = connectableHost(data.host);
+    return {
+      host,
+      port: Number(data.port) || port,
+      wsUrl: `ws://${host}:${Number(data.port) || port}`,
+      channel: typeof data.channel === "string" && data.channel ? data.channel : "default",
+      connectedChannels: Array.isArray(data.connectedChannels) ? data.connectedChannels : []
+    };
+  } catch (_err) {
+    return null;
+  }
+}
+
+async function scanServers() {
+  const checks = [];
+  for (let i = 0; i < scanPortCount; i += 1) checks.push(probeHealth(scanPortStart + i));
+  const results = await Promise.allSettled(checks);
+  const servers = [];
+  for (const r of results) {
+    if (r.status === "fulfilled" && r.value) servers.push(r.value);
+  }
+  servers.sort((a, b) => a.port - b.port);
+  try {
+    figma.ui.postMessage({ type: "servers", servers });
+  } catch (_err) {}
+  return servers;
+}
+
+// Populate the dropdown shortly after the UI loads; the user can rescan anytime.
+try {
+  setTimeout(() => { scanServers(); }, 500);
 } catch (_err) {}
 
 // ---------------------------------------------------------------------------
@@ -652,9 +1010,17 @@ async function assertInTarget(id) {
 async function enforceTargetScope(action, p) {
   if (pluginTargetFrameIds.size === 0) return;
   const extractor = TARGET_SCOPED_ACTIONS[action];
-  if (!extractor) return;
-  const ids = extractor(p).filter(Boolean).map(String);
-  for (let i = 0; i < ids.length; i += 1) await assertInTarget(ids[i]);
+  if (extractor) {
+    const ids = extractor(p).filter(Boolean).map(String);
+    for (let i = 0; i < ids.length; i += 1) await assertInTarget(ids[i]);
+    return;
+  }
+  if (READ_ONLY_ACTIONS.has(action) || TARGET_EXEMPT_ACTIONS.has(action)) return;
+  throw new Error(
+    "Blocked by target-frame scope: action '" + action +
+    "' is not registered for target-frame enforcement. Register an extractor in " +
+    "TARGET_SCOPED_ACTIONS, or call clear_target_frames to disable scope."
+  );
 }
 
 function serializeComponentPropertyDefinitions(definitions) {
@@ -1568,18 +1934,211 @@ async function setMultipleTextContents(params) {
   return { success: true, requested: updates.length, updated };
 }
 
+// ---------------------------------------------------------------------------
+// find_nodes — server-side predicate query
+// ---------------------------------------------------------------------------
+// Answers "which nodes match X" inside the plugin so the agent gets back only
+// the matching rows, instead of pulling a whole subtree into context and
+// filtering there. Every predicate is optional; supplying several ANDs them.
+
+function globToRegExp(pattern, matchCase) {
+  const escaped = String(pattern).replace(/[.+^${}()|[\]\\]/g, "\\$&");
+  const expanded = escaped.replace(/\*/g, ".*").replace(/\?/g, ".");
+  return new RegExp("^" + expanded + "$", matchCase ? "" : "i");
+}
+
+// Nodes carry paints on `fills`, which is figma.mixed when children differ.
+function nodeFillHexes(node) {
+  const fills = node.fills;
+  if (!fills || fills === figma.mixed || !Array.isArray(fills)) return [];
+  const out = [];
+  for (const paint of fills) {
+    if (paint && paint.type === "SOLID" && paint.color) out.push(rgb01ToHex(paint.color).toLowerCase());
+  }
+  return out;
+}
+
+function colorDistance(a, b) {
+  const pa = parseHexToRgb01(a);
+  const pb = parseHexToRgb01(b);
+  if (!pa || !pb) return Infinity;
+  return Math.sqrt((pa.r - pb.r) ** 2 + (pa.g - pb.g) ** 2 + (pa.b - pb.b) ** 2);
+}
+
+function boundVariableIdsOf(node) {
+  const bound = node.boundVariables;
+  if (!bound || typeof bound !== "object") return [];
+  const ids = [];
+  for (const key of Object.keys(bound)) {
+    const entry = bound[key];
+    if (!entry) continue;
+    const list = Array.isArray(entry) ? entry : [entry];
+    for (const item of list) {
+      if (item && typeof item === "object" && item.id) ids.push(String(item.id));
+    }
+  }
+  return ids;
+}
+
+async function findNodes(params) {
+  const p = params && typeof params === "object" ? params : {};
+  const types = ensureArray(p.types).map((t) => String(t).toUpperCase());
+  const matchCase = Boolean(p.matchCase);
+  const limit = p.limit !== undefined && p.limit !== null ? Math.max(1, Math.min(1000, Number(p.limit))) : 200;
+  const offset = p.offset !== undefined && p.offset !== null ? Math.max(0, Number(p.offset)) : 0;
+  const allPages = Boolean(p.allPages);
+  const rootNodeId = p.rootNodeId ? String(p.rootNodeId) : null;
+  const extraFields = ensureArray(p.fields).map(String);
+
+  const nameMatcher = p.name ? globToRegExp(p.name, matchCase) : null;
+  const nameRegexMatcher = p.nameRegex ? new RegExp(String(p.nameRegex), matchCase ? "" : "i") : null;
+  const textMatcher = p.textContains ? String(p.textContains) : null;
+  const textNeedle = textMatcher && !matchCase ? textMatcher.toLowerCase() : textMatcher;
+
+  const fillHex = p.fillHex ? String(p.fillHex).toLowerCase() : null;
+  const fillTolerance = p.fillTolerance !== undefined && p.fillTolerance !== null ? Number(p.fillTolerance) : 0;
+  const fillStyleId = p.fillStyleId ? String(p.fillStyleId) : null;
+  const textStyleId = p.textStyleId ? String(p.textStyleId) : null;
+  const variableId = p.boundVariableId ? String(p.boundVariableId) : null;
+  const hasBoundVariable = p.hasBoundVariable !== undefined ? Boolean(p.hasBoundVariable) : null;
+  const hasOverrides = p.hasOverrides !== undefined ? Boolean(p.hasOverrides) : null;
+  const mainComponentName = p.mainComponentName ? String(p.mainComponentName) : null;
+  const visibleOnly = p.visible !== undefined ? Boolean(p.visible) : null;
+  const missingStyle = p.missingFillStyle !== undefined ? Boolean(p.missingFillStyle) : null;
+
+  const pages = [];
+  if (allPages) {
+    await figma.loadAllPagesAsync();
+    for (const pg of figma.root.children) pages.push(pg);
+  } else {
+    await figma.currentPage.loadAsync();
+    pages.push(figma.currentPage);
+  }
+
+  // matchCount is the true number of matches across the whole search scope;
+  // `items` only ever holds the entries inside [offset, offset+limit), so a
+  // large result doesn't force building a huge array. total/truncated must
+  // reflect matchCount, not items.length, or paging silently lies about how
+  // much more data exists past the current page.
+  const items = [];
+  let matchCount = 0;
+  let scanned = 0;
+
+  for (const page of pages) {
+    let root = page;
+    if (rootNodeId && page.id === figma.currentPage.id) {
+      const explicit = await figma.getNodeByIdAsync(normalizeFigmaNodeId(rootNodeId));
+      if (explicit) root = explicit;
+      else throw new Error("Node not found with ID: " + rootNodeId);
+    } else if (rootNodeId && !allPages) {
+      throw new Error("Node not found with ID: " + rootNodeId);
+    }
+
+    const candidates = typeof root.findAll === "function" ? root.findAll(() => true) : [];
+    for (const node of candidates) {
+      scanned += 1;
+      if (types.length && types.indexOf(String(node.type).toUpperCase()) < 0) continue;
+      if (nameMatcher && !nameMatcher.test(String(node.name || ""))) continue;
+      if (nameRegexMatcher && !nameRegexMatcher.test(String(node.name || ""))) continue;
+      if (visibleOnly !== null && Boolean(node.visible) !== visibleOnly) continue;
+
+      if (textNeedle !== null) {
+        if (node.type !== "TEXT") continue;
+        const chars = String(node.characters || "");
+        if ((matchCase ? chars : chars.toLowerCase()).indexOf(textNeedle) < 0) continue;
+      }
+
+      if (fillHex) {
+        const hexes = nodeFillHexes(node);
+        if (!hexes.length) continue;
+        const hit = fillTolerance > 0
+          ? hexes.some((h) => colorDistance(h, fillHex) <= fillTolerance)
+          : hexes.indexOf(fillHex) >= 0;
+        if (!hit) continue;
+      }
+
+      if (fillStyleId && String(node.fillStyleId || "") !== fillStyleId) continue;
+      if (textStyleId && String(node.textStyleId || "") !== textStyleId) continue;
+
+      // A hardcoded paint with no style and no bound variable is the classic
+      // design-system offender, so make it directly queryable.
+      if (missingStyle !== null) {
+        const hasPaint = nodeFillHexes(node).length > 0;
+        const styled = Boolean(node.fillStyleId) || boundVariableIdsOf(node).length > 0;
+        if (missingStyle !== (hasPaint && !styled)) continue;
+      }
+
+      if (hasBoundVariable !== null && (boundVariableIdsOf(node).length > 0) !== hasBoundVariable) continue;
+      if (variableId && boundVariableIdsOf(node).indexOf(variableId) < 0) continue;
+
+      if (hasOverrides !== null) {
+        if (node.type !== "INSTANCE") continue;
+        const overrides = Array.isArray(node.overrides) ? node.overrides : [];
+        if ((overrides.length > 0) !== hasOverrides) continue;
+      }
+
+      if (mainComponentName) {
+        if (node.type !== "INSTANCE") continue;
+        const main = await node.getMainComponentAsync();
+        if (!main) continue;
+        const target = matchCase ? mainComponentName : mainComponentName.toLowerCase();
+        const actual = matchCase ? String(main.name) : String(main.name).toLowerCase();
+        if (actual.indexOf(target) < 0) continue;
+      }
+
+      const matchIndex = matchCount;
+      matchCount += 1;
+      if (matchIndex < offset || matchIndex >= offset + limit) continue;
+
+      const entry = { id: node.id, name: node.name, type: node.type, pageId: page.id, pageName: page.name };
+      for (const field of extraFields) {
+        if (field === "fillHex") entry.fillHex = nodeFillHexes(node)[0] || null;
+        else if (field === "characters") entry.characters = node.type === "TEXT" ? String(node.characters || "") : null;
+        else if (field === "boundVariableIds") entry.boundVariableIds = boundVariableIdsOf(node);
+        else if (field in node) {
+          const value = node[field];
+          entry[field] = value === figma.mixed ? "MIXED" : value;
+        }
+      }
+      items.push(entry);
+    }
+  }
+
+  return {
+    success: true,
+    scanned,
+    total: matchCount,
+    offset,
+    limit,
+    truncated: matchCount > offset + items.length,
+    items
+  };
+}
+
 async function scanTextNodes(params) {
   await figma.currentPage.loadAsync();
   const rootNodeId = params && params.rootNodeId ? String(params.rootNodeId) : null;
   const chunkSize = Math.min(500, params && params.chunkSize ? Number(params.chunkSize) : 200);
   const offset = params && params.offset ? Number(params.offset) : 0;
+  const maxChars = params && params.maxChars !== undefined && params.maxChars !== null
+    ? Math.max(0, Number(params.maxChars))
+    : 120;
   let root = null;
   if (rootNodeId) root = await figma.getNodeByIdAsync(rootNodeId);
   const container = root && root.type !== "DOCUMENT" ? root : figma.currentPage;
   const nodes = container.findAll((n) => n.type === "TEXT");
-  const items = nodes.map((n) => ({ id: n.id, name: n.name, characters: String(n.characters || "") }));
-  const slice = items.slice(offset, offset + chunkSize);
-  return { total: items.length, offset, chunkSize, items: slice };
+  const slice = nodes.slice(offset, offset + chunkSize);
+  const items = slice.map((n) => {
+    const chars = String(n.characters || "");
+    const full = Number.isFinite(maxChars) && chars.length > maxChars;
+    return {
+      id: n.id,
+      name: n.name,
+      characters: full ? chars.slice(0, maxChars) : chars,
+      truncated: full ? true : undefined
+    };
+  });
+  return { total: nodes.length, offset, chunkSize, maxChars, items };
 }
 
 async function scanNodesByTypes(params) {
@@ -1870,10 +2429,10 @@ async function setFixedChildren(params) {
 // ---------------------------------------------------------------------------
 
 async function getLocalComponents(params) {
-  await figma.currentPage.loadAsync();
-  const page = figma.currentPage;
+  await figma.loadAllPagesAsync();
   const includeComponentSets = params && params.includeComponentSets !== undefined ? Boolean(params.includeComponentSets) : true;
-  const nodes = page.findAll((n) => {
+  const includeProperties = params && params.includeProperties !== undefined ? Boolean(params.includeProperties) : false;
+  const nodes = figma.root.findAll((n) => {
     if (n.type === "COMPONENT") {
       // A variant component is a child of a COMPONENT_SET. Reading
       // componentPropertyDefinitions on a variant throws in the Plugin API,
@@ -1887,21 +2446,30 @@ async function getLocalComponents(params) {
   });
   return nodes.map((n) => {
     let defs = {};
-    try {
-      defs = n.componentPropertyDefinitions
-        ? simplifyComponentPropertyDefinitionsForRead(n.componentPropertyDefinitions)
-        : {};
-    } catch {
-      defs = {};
+    if (includeProperties) {
+      try {
+        defs = n.componentPropertyDefinitions
+          ? simplifyComponentPropertyDefinitionsForRead(n.componentPropertyDefinitions)
+          : {};
+      } catch {
+        defs = {};
+      }
     }
-    return {
+    const entry = {
       id: n.id,
       name: n.name,
       type: n.type,
       description: typeof n.description === "string" && n.description ? n.description : null,
-      key: typeof n.key === "string" && n.key ? n.key : null,
-      componentPropertyDefinitions: Object.keys(defs).length ? defs : null
+      key: typeof n.key === "string" && n.key ? n.key : null
     };
+    if (includeProperties) {
+      entry.componentPropertyDefinitions = Object.keys(defs).length ? defs : null;
+    } else {
+      entry.propertyCount = n.componentPropertyDefinitions
+        ? Object.keys(n.componentPropertyDefinitions).length
+        : 0;
+    }
+    return entry;
   });
 }
 
@@ -3001,6 +3569,7 @@ async function listVariableCollections() {
 
 async function listVariables(params) {
   const resolvedType = params && params.resolvedType ? String(params.resolvedType) : undefined;
+  const includeScopes = params && params.includeScopes !== undefined ? Boolean(params.includeScopes) : false;
   let vars;
   try {
     vars = resolvedType ? await figma.variables.getLocalVariablesAsync(resolvedType) : await figma.variables.getLocalVariablesAsync();
@@ -3012,7 +3581,20 @@ async function listVariables(params) {
     }
     vars = all;
   }
-  return { variables: vars.map((v) => ({ id: v.id, name: v.name, key: v.key, resolvedType: v.resolvedType, variableCollectionId: v.variableCollectionId, remote: Boolean(v.remote), scopes: v.scopes })) };
+  return {
+    variables: vars.map((v) => {
+      const entry = {
+        id: v.id,
+        name: v.name,
+        key: v.key,
+        resolvedType: v.resolvedType,
+        variableCollectionId: v.variableCollectionId,
+        remote: Boolean(v.remote)
+      };
+      if (includeScopes) entry.scopes = v.scopes;
+      return entry;
+    })
+  };
 }
 
 async function createVariableCollection(params) {
@@ -3202,6 +3784,9 @@ async function findAndReplaceText(params) {
   const dryRun = Boolean(p.dryRun);
   const allPages = Boolean(p.allPages);
   const rootNodeId = p.rootNodeId ? String(p.rootNodeId) : null;
+  const maxPreviewLength = p.maxPreviewLength !== undefined && p.maxPreviewLength !== null
+    ? Math.max(0, Number(p.maxPreviewLength))
+    : 200;
 
   let pattern;
   if (useRegex) {
@@ -3236,7 +3821,14 @@ async function findAndReplaceText(params) {
       matcher.lastIndex = 0;
       const next = current.replace(matcher, replacement);
       if (next === current) continue;
-      changes.push({ nodeId: node.id, pageId: page.id, pageName: page.name, name: node.name, before: current, after: next });
+      let before = current;
+      let after = next;
+      let truncated = false;
+      if (Number.isFinite(maxPreviewLength) && maxPreviewLength >= 0) {
+        if (before.length > maxPreviewLength) { before = before.slice(0, maxPreviewLength); truncated = true; }
+        if (after.length > maxPreviewLength) { after = after.slice(0, maxPreviewLength); truncated = true; }
+      }
+      changes.push({ nodeId: node.id, pageId: page.id, pageName: page.name, name: node.name, before, after, previewTruncated: truncated ? true : undefined });
       if (!dryRun) {
         if (node.fontName !== figma.mixed) {
           await figma.loadFontAsync(node.fontName);
@@ -3298,8 +3890,8 @@ async function getSelectionContext(params) {
 // These serialize the live scene graph directly (no exportAsync round trip) so
 // an AI agent can read the whole open file's structure in one call without
 // paying the token cost of full REST-style node dumps. Compact by design:
-// every node is {id, name, type}; TEXT nodes include their characters by
-// default; extra fields are opt-in via `fields`.
+// every node is {id, name, type}; extra fields (including TEXT characters) are
+// opt-in via `fields`. getDocumentTree defaults to maxDepth 3 to bound output.
 
 function countCompactTreeNodes(node) {
   let count = 1;
@@ -3371,8 +3963,7 @@ function buildCompactTree(node, options, depth) {
 
   const item = { id: node.id, name: node.name, type: node.type };
   const fields = Array.isArray(opts.fields) ? opts.fields : [];
-  const includeCharacters = fields.indexOf("characters") >= 0 || (fields.length === 0 && node.type === "TEXT");
-  if (includeCharacters) item.characters = String(node.characters || "");
+  if (fields.indexOf("characters") >= 0) item.characters = String(node.characters || "");
 
   for (let i = 0; i < fields.length; i += 1) {
     const field = fields[i];
@@ -3406,25 +3997,33 @@ function buildCompactTree(node, options, depth) {
   return item;
 }
 
-async function getAllPages() {
+async function getAllPages(params) {
   await figma.loadAllPagesAsync();
-  const pages = figma.root.children.map((page) => ({
-    id: page.id,
-    name: page.name,
-    childCount: page.children.length,
-    topLevel: page.children.map((n) => ({
-      id: n.id,
-      name: n.name,
-      type: n.type,
-      childCount: n.children ? n.children.length : 0
-    }))
-  }));
+  const includeTopLevel = params && params.includeTopLevel !== undefined ? Boolean(params.includeTopLevel) : false;
+  const pages = figma.root.children.map((page) => {
+    const entry = {
+      id: page.id,
+      name: page.name,
+      childCount: page.children.length
+    };
+    if (includeTopLevel) {
+      entry.topLevel = page.children.map((n) => ({
+        id: n.id,
+        name: n.name,
+        type: n.type,
+        childCount: n.children ? n.children.length : 0
+      }));
+    }
+    return entry;
+  });
   return { success: true, totalPages: pages.length, currentPageId: figma.currentPage.id, pages };
 }
 
 async function getDocumentTree(options) {
   const opts = options && typeof options === "object" ? options : {};
   const rootNodeId = opts.rootNodeId ? String(opts.rootNodeId) : null;
+  const maxDepth = Number.isFinite(opts.maxDepth) ? opts.maxDepth : 3;
+  const treeOpts = Object.assign({}, opts, { maxDepth });
   let root = null;
   if (rootNodeId) {
     root = await figma.getNodeByIdAsync(normalizeFigmaNodeId(rootNodeId));
@@ -3433,7 +4032,7 @@ async function getDocumentTree(options) {
     await figma.loadAllPagesAsync();
     root = figma.root;
   }
-  const tree = buildCompactTree(root, opts, 0);
+  const tree = buildCompactTree(root, treeOpts, 0);
   return {
     success: true,
     rootNodeId: root.id,
@@ -4815,8 +5414,50 @@ const TARGET_SCOPED_ACTIONS = {
   arrange_children: (p) => [p.parentNodeId],
   generate_palette: (p) => (p.parentNodeId ? [p.parentNodeId] : []),
   create_typography_scale: (p) => (p.parentNodeId ? [p.parentNodeId] : []),
-  extract_component_set: (p) => ensureArray(p.nodeIds).concat(p.parentNodeId ? [p.parentNodeId] : [])
+  extract_component_set: (p) => ensureArray(p.nodeIds).concat(p.parentNodeId ? [p.parentNodeId] : []),
+  create_component_from_node: (p) => [p.nodeId],
+  set_instance_properties: (p) => [p.instanceId],
+  swap_instance_component: (p) => [p.instanceId],
+  set_overlay_settings: (p) => [p.nodeId]
 };
+
+// Fail-closed target-frame enforcement: any allowed action that mutates nodes
+// must either have an extractor above, be a documented bulk/page/style/variable
+// operation in TARGET_EXEMPT_ACTIONS, or be a pure read in READ_ONLY_ACTIONS.
+// Otherwise enforceTargetScope throws instead of silently bypassing the guard.
+const READ_ONLY_ACTIONS = new Set([
+  "ping", "get_document_info", "get_selection", "read_my_design",
+  "get_node_info", "get_nodes_info", "get_all_pages", "get_document_tree",
+  "get_selection_context", "get_changes_since", "get_instance_source",
+  "scan_instances_with_sources", "get_instance_properties", "get_instance_slots",
+  "get_component_property_definitions", "get_style_guide", "get_font_list",
+  "scan_text_nodes", "scan_nodes_by_types", "find_nodes", "get_styles", "get_local_components",
+  "get_annotations", "get_reactions", "get_overlay_settings", "get_prototype_settings",
+  "list_variable_collections", "list_variables", "list_checkpoints",
+  "get_parent_chain", "export_node_as_image", "search_components",
+  "set_focus", "set_selections",
+  "create_checkpoint", "subscribe_events", "unsubscribe_events", "get_events", "list_channels",
+  "get_figma_data", "figma_get_selection", "figma_get_document_info",
+  "getDocumentInfo", "getSelection"
+]);
+
+const TARGET_EXEMPT_ACTIONS = new Set([
+  "run_batch", "restore_checkpoint", "undo", "redo",
+  "create_rectangle", "create_frame", "create_text", "create_component", "create_component_instance",
+  "create_paint_style", "create_text_style", "create_effect_style", "create_grid_style",
+  "create_variable_collection", "create_variable", "set_variable_values", "rename_variable", "delete_variable",
+  "import_variable_by_key", "import_style_by_key", "import_component_by_key", "import_component_set_by_key",
+  "create_variable_mode", "rename_variable_mode", "delete_variable_mode", "rename_variable_collection",
+  "create_instance_from_component_key", "create_instance_from_component_set_key", "create_instance_from_instance",
+  "create_component_slot", "edit_component_slot", "delete_component_slot",
+  "add_component_property", "edit_component_property", "delete_component_property", "bind_component_property",
+  "combine_as_variants", "set_variant_properties",
+  "create_page", "rename_page", "delete_page", "duplicate_page", "set_current_page", "reorder_page",
+  "set_flow_starting_points", "set_prototype_start_node",
+  "find_and_replace_text", "sync_target_frames",
+  "import_tokens", "export_tokens",
+  "renameNode", "setText", "createFrame", "createRectangle", "createText", "setSolidFill"
+]);
 
 const ALLOWED_ACTIONS = new Set([
   "ping",
@@ -4837,7 +5478,7 @@ const ALLOWED_ACTIONS = new Set([
   "create_instance_from_component_key", "create_instance_from_component_set_key",
   "get_instance_properties", "set_instance_properties", "swap_instance_component",
   "export_node_as_image",
-  "scan_text_nodes", "scan_nodes_by_types",
+  "scan_text_nodes", "scan_nodes_by_types", "find_nodes",
   "create_rectangle", "create_frame", "create_text",
   "set_fill_color", "set_stroke_color",
   "set_layout_mode", "set_padding", "set_axis_align", "set_layout_sizing", "set_item_spacing",
@@ -4952,7 +5593,7 @@ async function dispatchAction(action, payload) {
     case "read_my_design": return await readMyDesign(p);
     case "get_node_info": return await getNodeInfo(p.nodeId, p);
     case "get_nodes_info": return await getNodesInfo(p.nodeIds, p);
-    case "get_all_pages": return await getAllPages();
+    case "get_all_pages": return await getAllPages(p);
     case "get_document_tree": return await getDocumentTree(p);
     case "get_instance_source": return await getInstanceSource(p);
     case "scan_instances_with_sources": return await scanInstancesWithSources(p);
@@ -4984,6 +5625,7 @@ async function dispatchAction(action, payload) {
     case "export_node_as_image": return await exportNodeAsImage(p);
     case "scan_text_nodes": return await scanTextNodes(p);
     case "scan_nodes_by_types": return await scanNodesByTypes(p);
+    case "find_nodes": return await findNodes(p);
     case "create_rectangle": case "createRectangle": return await createRectangleNode(p);
     case "create_frame": case "createFrame": return await createFrameNode(p);
     case "create_text": case "createText": return await createTextNode(p);
@@ -5127,8 +5769,47 @@ async function dispatchAction(action, payload) {
 // Message handler
 // ---------------------------------------------------------------------------
 
+// The undo/redo stacks live here in the main thread, so the UI buttons and the
+// agent's `undo`/`redo` MCP tools drive the same history: an agent edit can be
+// undone from the UI, and a UI undo is visible to the agent. Pushed to the UI
+// after every action so the buttons reflect real stack depth.
+function postUndoState() {
+  try {
+    figma.ui.postMessage({
+      type: "undoState",
+      undoDepth: undoStack.length,
+      redoDepth: redoStack.length,
+      undoLabel: undoStack.length ? undoStack[undoStack.length - 1].label : "",
+      redoLabel: redoStack.length ? redoStack[redoStack.length - 1].label : ""
+    });
+  } catch (_err) {}
+}
+
 figma.ui.onmessage = async (msg) => {
-  if (!msg || msg.type !== "exec" || typeof msg.id !== "string") return;
+  if (!msg || typeof msg !== "object") return;
+  if (msg.type === "scanServers") {
+    scanServers();
+    return;
+  }
+  if (msg.type === "undoState") {
+    postUndoState();
+    return;
+  }
+  if (msg.type === "localUndo" || msg.type === "localRedo") {
+    const action = msg.type === "localUndo" ? "undo" : "redo";
+    try {
+      const result = await handleAction(action, {});
+      figma.ui.postMessage({ type: "localResult", action, ok: true, result });
+      figma.notify(action === "undo" ? "Undid last bridge change" : "Redid last bridge change");
+    } catch (err) {
+      const error = err && err.message ? String(err.message) : String(err);
+      figma.ui.postMessage({ type: "localResult", action, ok: false, error });
+      figma.notify(error, { error: true });
+    }
+    postUndoState();
+    return;
+  }
+  if (msg.type !== "exec" || typeof msg.id !== "string") return;
   try {
     const result = await handleAction(String(msg.action), msg.payload || {});
     figma.ui.postMessage({ type: "result", id: msg.id, ok: true, result });
@@ -5140,4 +5821,5 @@ figma.ui.onmessage = async (msg) => {
       error: err && err.message ? String(err.message) : String(err)
     });
   }
+  postUndoState();
 };
