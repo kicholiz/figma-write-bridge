@@ -3096,14 +3096,15 @@ server.registerTool(
   "list_variables",
   {
     title: "List variables",
-    description: "List local variables in the current file (optionally filtered by resolvedType). Pass includeScopes: true to also return each variable's scopes.",
+    description: "List local variables in the current file (optionally filtered by resolvedType). Pass includeScopes: true to also return each variable's scopes, or includeValues: true to also return each variable's value in EVERY mode (valuesByMode by modeId, valuesByModeName by mode name, defaultValue from the collection's first mode, and the mode list) — use this to read theme/dark-mode values, not just the default mode.",
     inputSchema: {
       resolvedType: z.string().optional(),
-      includeScopes: z.boolean().optional().describe("Include per-variable scopes arrays. Default false to keep output small.")
+      includeScopes: z.boolean().optional().describe("Include per-variable scopes arrays. Default false to keep output small."),
+      includeValues: z.boolean().optional().describe("Include per-variable values for every mode (valuesByMode, valuesByModeName, defaultValue, modes). Default false.")
     }
   },
-  async ({ resolvedType, includeScopes }) => {
-    const result = await sendCommand("list_variables", { resolvedType, includeScopes });
+  async ({ resolvedType, includeScopes, includeValues }) => {
+    const result = await sendCommand("list_variables", { resolvedType, includeScopes, includeValues });
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );

@@ -335,8 +335,8 @@ Pass `verbose: true` to any of the four to get the original array-of-objects (or
 - `get_instance_source`
 - `get_styles`
 - `get_local_components`
-- `list_variable_collections`
-- `list_variables`
+- `list_variable_collections` — lists every collection with its modes (id/name). Use this first to discover mode ids/names.
+- `list_variables` — list local variables. Pass `includeValues: true` to read each variable's value in **every** mode (`valuesByMode` keyed by modeId, `valuesByModeName` keyed by mode name, `defaultValue` from the collection's first mode, plus the mode list). This is how you read theme/dark-mode values, not just the default mode. `set_variable_values` / `create_variable` accept `valuesByMode` keyed by mode id, mode name, or mode index to write into any mode.
 - `get_annotations`
 - `get_reactions`
 - `get_changes_since` — pass the `currentSeq` from a previous call as `sinceSeq` to get back only the node ids this bridge has mutated since then, instead of re-reading the whole document to see what changed. Cursor resets when the MCP server restarts.

@@ -3718,9 +3718,17 @@ async function listVariableCollections() {
   return { collections: cols.map((c) => ({ id: c.id, name: c.name, modes: c.modes.map((m) => ({ modeId: m.modeId, name: m.name })), variableIdsCount: c.variableIds ? c.variableIds.length : 0 })) };
 }
 
+function serializeVariableValue(value) {
+  if (value && typeof value === "object") {
+    if (value.type === "VARIABLE_ALIAS") return { type: "VARIABLE_ALIAS", id: String(value.id) };
+  }
+  return value;
+}
+
 async function listVariables(params) {
   const resolvedType = params && params.resolvedType ? String(params.resolvedType) : undefined;
   const includeScopes = params && params.includeScopes !== undefined ? Boolean(params.includeScopes) : false;
+  const includeValues = params && params.includeValues !== undefined ? Boolean(params.includeValues) : false;
   let vars;
   try {
     vars = resolvedType ? await figma.variables.getLocalVariablesAsync(resolvedType) : await figma.variables.getLocalVariablesAsync();
@@ -3731,6 +3739,13 @@ async function listVariables(params) {
       try { const part = await figma.variables.getLocalVariablesAsync(type); for (const v of part) all.push(v); } catch (_err) {}
     }
     vars = all;
+  }
+  let collectionsById = null;
+  if (includeValues) {
+    try {
+      const cols = await figma.variables.getLocalVariableCollectionsAsync();
+      collectionsById = new Map(cols.map((c) => [c.id, c]));
+    } catch (_err) {}
   }
   return {
     variables: vars.map((v) => {
@@ -3743,6 +3758,24 @@ async function listVariables(params) {
         remote: Boolean(v.remote)
       };
       if (includeScopes) entry.scopes = v.scopes;
+      if (includeValues) {
+        const values = v.valuesByMode || {};
+        const col = collectionsById ? collectionsById.get(v.variableCollectionId) : null;
+        const modes = col && Array.isArray(col.modes) ? col.modes : [];
+        entry.modes = modes.map((m) => ({ modeId: m.modeId, name: m.name }));
+        entry.valuesByMode = {};
+        entry.valuesByModeName = {};
+        for (const m of modes) {
+          const val = values[m.modeId];
+          if (val === undefined) continue;
+          entry.valuesByMode[m.modeId] = serializeVariableValue(val);
+          entry.valuesByModeName[m.name] = serializeVariableValue(val);
+        }
+        const firstMode = modes.length ? modes[0] : null;
+        entry.defaultValue = firstMode && values[firstMode.modeId] !== undefined
+          ? serializeVariableValue(values[firstMode.modeId])
+          : null;
+      }
       return entry;
     })
   };
