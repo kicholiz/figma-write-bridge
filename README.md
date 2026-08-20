@@ -27,7 +27,7 @@ This repo contains:
 - **Undo/redo** — snapshot-based `undo` / `redo` for the most recent mutating actions, shared between the agent's tools and Undo/Redo buttons in the plugin UI itself (best-effort; cannot restore deleted nodes or structural changes).
 - **Pages** — create, rename, duplicate (auto-names like `Name 2` or takes a `name`), reorder, switch, and delete pages; `create_page` / `duplicate_page` accept `activate: true` to switch to the new page.
 - **Bulk & template work** — `bulk_rename`, `bulk_update`, `replace_all_instances`, and page duplication.
-- **Variables & themes** — create/rename/delete variable modes and collections, and theme-switch whole frames/pages with `set_variable_mode`.
+- **Variables & themes** — create/rename/delete variable modes and collections, read every variable's value in every mode (`list_variables` with `includeValues: true` returns `valuesByMode`/`valuesByModeName`/`defaultValue`), write values into any mode (`set_variable_values(valuesByMode)`), and theme-switch whole frames/pages with `set_variable_mode`.
 - **Live push events** — subscribe to `selectionchange` / `documentchange` so the agent can react to your selection or canvas without polling.
 - **Channel dashboard** — `list_channels` shows which file each connected channel belongs to.
 - **REST API extras** — file JSON, image downloads, bulk frame exports, file comments, and component search (with `FIGMA_TOKEN`).
