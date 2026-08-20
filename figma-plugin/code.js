@@ -958,9 +958,6 @@ async function getNodeByIdAsync(id) {
   return node;
 }
 
-function assertNodeWritable(node, params) {
-  return;
-}
 
 async function resolveCreateHost(params) {
   const p = params && typeof params === "object" ? params : {};
@@ -1329,16 +1326,17 @@ function filterFigmaNode(node, options, depth) {
 // ---------------------------------------------------------------------------
 
 async function getDocumentInfoFull() {
-  await figma.currentPage.loadAsync();
+  await figma.loadAllPagesAsync();
   const page = figma.currentPage;
+  const pageEntry = (p) => ({ id: p.id, name: p.name, childCount: p.children.length });
   return {
     name: page.name,
     id: page.id,
     type: page.type,
     fileKey: typeof figma.fileKey === "string" ? figma.fileKey : null,
     children: page.children.map((node) => ({ id: node.id, name: node.name, type: node.type })),
-    currentPage: { id: page.id, name: page.name, childCount: page.children.length },
-    pages: [{ id: page.id, name: page.name, childCount: page.children.length }]
+    currentPage: pageEntry(page),
+    pages: figma.root.children.map(pageEntry)
   };
 }
 
@@ -1393,9 +1391,22 @@ async function setSelections(params) {
   const nodes = await Promise.all(ids.map((id) => figma.getNodeByIdAsync(String(id))));
   const validNodes = nodes.filter((n) => n !== null);
   if (!validNodes.length) throw new Error("No valid nodes found");
-  figma.currentPage.selection = validNodes;
-  figma.viewport.scrollAndZoomIntoView(validNodes);
-  return { success: true, selectionCount: validNodes.length, nodeIds: validNodes.map((n) => n.id) };
+  const currentId = figma.currentPage.id;
+  const currentPageNodes = validNodes.filter((n) => {
+    let cur = n;
+    while (cur && cur.type !== "PAGE") cur = cur.parent;
+    return cur && cur.id === currentId;
+  });
+  if (currentPageNodes.length) {
+    figma.currentPage.selection = currentPageNodes;
+    figma.viewport.scrollAndZoomIntoView(currentPageNodes);
+  }
+  return {
+    success: true,
+    selectionCount: currentPageNodes.length,
+    nodeIds: currentPageNodes.map((n) => n.id),
+    skippedOnOtherPages: validNodes.length - currentPageNodes.length
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1464,7 +1475,6 @@ async function setFillColor(params) {
   if (!params || !params.nodeId) throw new Error("Missing nodeId parameter");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
-  assertNodeWritable(node, params);
   if (!("fills" in node)) throw new Error("Node does not support fills");
   const r = normalize01From01Or255(params.r);
   const g = normalize01From01Or255(params.g);
@@ -1478,7 +1488,6 @@ async function setStrokeColor(params) {
   if (!params || !params.nodeId) throw new Error("Missing nodeId parameter");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
-  assertNodeWritable(node, params);
   if (!("strokes" in node)) throw new Error("Node does not support strokes");
   const r = normalize01From01Or255(params.r);
   const g = normalize01From01Or255(params.g);
@@ -1494,17 +1503,67 @@ async function moveNode(params) {
   if (!params || !params.nodeId) throw new Error("Missing nodeId parameter");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
-  assertNodeWritable(node, params);
-  node.x = Number(params.x === undefined || params.x === null ? node.x : params.x);
-  node.y = Number(params.y === undefined || params.y === null ? node.y : params.y);
-  return { success: true, nodeId: node.id, x: node.x, y: node.y };
+  const inAutoLayout = isAutoLayoutParent(node.parent);
+  if (inAutoLayout) {
+    try { node.layoutPositioning = "ABSOLUTE"; } catch (_) {}
+  }
+  const dx = Number(params.dx === undefined || params.dx === null ? 0 : params.dx);
+  const dy = Number(params.dy === undefined || params.dy === null ? 0 : params.dy);
+  if (params.x !== undefined) node.x = Number(params.x);
+  else if (dx !== 0) node.x = Number(node.x) + dx;
+  if (params.y !== undefined) node.y = Number(params.y);
+  else if (dy !== 0) node.y = Number(node.y) + dy;
+  return { success: true, nodeId: node.id, x: node.x, y: node.y, layoutPositioning: inAutoLayout ? node.layoutPositioning : undefined };
+}
+
+function isAutoLayoutParent(parent) {
+  return Boolean(parent && parent.type === "FRAME" && parent.layoutMode && parent.layoutMode !== "NONE");
+}
+
+function appendNodeTo(parent, node, index) {
+  const parentKind = parent.type || "node";
+  const childKind = node.type || "node";
+  try {
+    if (index !== null && index !== undefined && "insertChild" in parent) {
+      const idx = Math.min(Math.max(0, Math.floor(Number(index))), parent.children.length);
+      parent.insertChild(idx, node);
+      return;
+    }
+    if (!("appendChild" in parent)) throw new Error("Target cannot contain children");
+    parent.appendChild(node);
+  } catch (err) {
+    let hint = "";
+    if (childKind === "GROUP" && parentKind === "PAGE") {
+      hint = " Groups cannot be placed directly on a page; move the group into a frame or section first.";
+    }
+    throw new Error(
+      `Cannot place ${childKind} into ${parentKind}: ${err && err.message ? String(err.message) : String(err)}.${hint}`
+    );
+  }
+}
+
+function applyNodePosition(node, parent, x, y, dx, dy) {
+  if (!("x" in node) || !("y" in node)) return;
+  const inAutoLayout = isAutoLayoutParent(parent);
+  const hasX = x !== undefined && x !== null;
+  const hasY = y !== undefined && y !== null;
+  const relDx = dx !== undefined && dx !== null && Number(dx) !== 0;
+  const relDy = dy !== undefined && dy !== null && Number(dy) !== 0;
+  const wantsPosition = hasX || hasY || relDx || relDy;
+  if (inAutoLayout) {
+    try { node.layoutPositioning = wantsPosition ? "ABSOLUTE" : "AUTO"; } catch (_) {}
+    if (!wantsPosition) return;
+  }
+  if (hasX) node.x = Number(x);
+  if (hasY) node.y = Number(y);
+  if (relDx) node.x = Number(node.x) + Number(dx);
+  if (relDy) node.y = Number(node.y) + Number(dy);
 }
 
 async function resizeNode(params) {
   if (!params || !params.nodeId) throw new Error("Missing nodeId parameter");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
-  assertNodeWritable(node, params);
   const w = Number(params.width);
   const h = Number(params.height);
   if (!Number.isFinite(w) || !Number.isFinite(h)) throw new Error("Missing or invalid width/height");
@@ -1520,17 +1579,15 @@ async function reparentNode(params) {
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
   const nextParent = await figma.getNodeByIdAsync(String(params.newParentId));
   if (!nextParent) throw new Error("Parent not found with ID: " + String(params.newParentId));
-  assertNodeWritable(node, params);
-  assertNodeWritable(nextParent, params);
-  if (!("appendChild" in nextParent)) throw new Error("Parent cannot contain children");
-  nextParent.appendChild(node);
-  if (params.x !== undefined || params.y !== undefined) {
-    if ("x" in node && "y" in node) {
-      if (params.x !== undefined) node.x = Number(params.x);
-      if (params.y !== undefined) node.y = Number(params.y);
-    }
+  let cursor = nextParent;
+  while (cursor) {
+    if (cursor === node) throw new Error("Cannot move a node into itself or one of its own descendants");
+    cursor = cursor.parent;
   }
-  return { success: true, nodeId: node.id, newParentId: nextParent.id };
+  const index = params.index !== undefined && params.index !== null ? Math.max(0, Math.floor(Number(params.index))) : null;
+  appendNodeTo(nextParent, node, index);
+  applyNodePosition(node, nextParent, params.x, params.y, undefined, undefined);
+  return { success: true, nodeId: node.id, newParentId: nextParent.id, index: index === null ? undefined : index };
 }
 
 async function getParentChain(params) {
@@ -1558,11 +1615,10 @@ async function insertChild(params) {
   if (!parent) throw new Error("Parent not found with ID: " + String(params.parentId));
   const child = await figma.getNodeByIdAsync(String(params.childId));
   if (!child) throw new Error("Child not found with ID: " + String(params.childId));
-  assertNodeWritable(parent, params);
-  assertNodeWritable(child, params);
   if (!("insertChild" in parent)) throw new Error("Parent does not support insertChild");
   const rawIndex = Number(params.index);
-  const index = Number.isFinite(rawIndex) ? Math.max(0, Math.floor(rawIndex)) : 0;
+  const clamped = Number.isFinite(rawIndex) ? Math.max(0, Math.floor(rawIndex)) : 0;
+  const index = Math.min(clamped, parent.children.length);
   parent.insertChild(index, child);
   return { success: true, parentId: parent.id, childId: child.id, index };
 }
@@ -1572,12 +1628,9 @@ async function deleteNode(params) {
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
   const confirmFrameOrPageDeletion = params && typeof params === "object" ? params.confirmFrameOrPageDeletion === true : false;
-  const isPage = node.type === "PAGE";
-  const isTopLevelFrame = node.type === "FRAME" && node.parent && node.parent.type === "PAGE";
-  if ((isPage || isTopLevelFrame) && !confirmFrameOrPageDeletion) {
-    throw new Error("Confirmation required to delete a page or a top-level frame. Pass confirmFrameOrPageDeletion: true.");
+  if (requiresDeletionConfirmation(node) && !confirmFrameOrPageDeletion) {
+    throw new Error("Confirmation required to delete a page, top-level frame, or top-level section. Pass confirmFrameOrPageDeletion: true.");
   }
-  assertNodeWritable(node, params);
   if (!("remove" in node)) throw new Error("Node does not support remove");
   node.remove();
   return { success: true, nodeId: String(params.nodeId) };
@@ -1594,13 +1647,9 @@ async function deleteMultipleNodes(params) {
       const nodeId = String(id);
       const node = await figma.getNodeByIdAsync(nodeId);
       if (!node) { failed.push({ nodeId, error: "Node not found" }); continue; }
-      const confirmFrameOrPageDeletion = p.confirmFrameOrPageDeletion === true;
-      const isPage = node.type === "PAGE";
-      const isTopLevelFrame = node.type === "FRAME" && node.parent && node.parent.type === "PAGE";
-      if ((isPage || isTopLevelFrame) && !confirmFrameOrPageDeletion) {
-        failed.push({ nodeId, error: "Confirmation required to delete a page or a top-level frame" }); continue;
+      if (requiresDeletionConfirmation(node) && p.confirmFrameOrPageDeletion !== true) {
+        failed.push({ nodeId, error: "Confirmation required to delete a page, top-level frame, or top-level section" }); continue;
       }
-      assertNodeWritable(node, p);
       if (!("remove" in node)) { failed.push({ nodeId, error: "Node does not support remove" }); continue; }
       node.remove();
       deletedNodeIds.push(nodeId);
@@ -1609,6 +1658,11 @@ async function deleteMultipleNodes(params) {
     }
   }
   return { success: true, deletedNodeIds, failed };
+}
+
+function requiresDeletionConfirmation(node) {
+  return node.type === "PAGE" ||
+    ((node.type === "FRAME" || node.type === "SECTION") && node.parent && node.parent.type === "PAGE");
 }
 
 // ---------------------------------------------------------------------------
@@ -1703,7 +1757,6 @@ async function restoreCheckpoint(params) {
     try {
       const node = await figma.getNodeByIdAsync(item.nodeId);
       if (!node) { result.error = "Node no longer exists"; results.push(result); continue; }
-      assertNodeWritable(node, p);
       await applyNodeSnapshotProps(node, item.props);
       result.restored = true;
     } catch (err) {
@@ -1809,7 +1862,6 @@ async function applySnapshotToNodes(snapshot) {
     try {
       const node = await figma.getNodeByIdAsync(item.nodeId);
       if (!node) { result.error = "Node no longer exists"; results.push(result); continue; }
-      assertNodeWritable(node, {});
       await applyNodeSnapshotProps(node, item.props);
       result.restored = true;
     } catch (err) {
@@ -1842,15 +1894,18 @@ async function cloneNode(params) {
   if (!params || !params.nodeId) throw new Error("Missing nodeId parameter");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
-  assertNodeWritable(node, params);
   if (!("clone" in node)) throw new Error("Node does not support clone");
   const cloned = node.clone();
   const dx = Number(params.dx === undefined || params.dx === null ? 20 : params.dx);
   const dy = Number(params.dy === undefined || params.dy === null ? 20 : params.dy);
-  cloned.x = Number(cloned.x) + dx;
-  cloned.y = Number(cloned.y) + dy;
-  figma.currentPage.selection = [cloned];
-  figma.viewport.scrollAndZoomIntoView([cloned]);
+  applyNodePosition(cloned, node.parent, undefined, undefined, dx, dy);
+  if (params.name !== undefined && params.name !== null) cloned.name = String(params.name);
+  let clonedPage = cloned;
+  while (clonedPage && clonedPage.type !== "PAGE") clonedPage = clonedPage.parent;
+  if (clonedPage && figma.currentPage && clonedPage.id === figma.currentPage.id) {
+    figma.currentPage.selection = [cloned];
+    figma.viewport.scrollAndZoomIntoView([cloned]);
+  }
   return { success: true, nodeId: cloned.id };
 }
 
@@ -1859,18 +1914,18 @@ async function cloneNodeIntoParent(params) {
   if (!params || !params.parentNodeId) throw new Error("Missing parentNodeId parameter");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
-  assertNodeWritable(node, params);
   if (!("clone" in node)) throw new Error("Node does not support clone");
   const parent = await figma.getNodeByIdAsync(String(params.parentNodeId));
   if (!parent) throw new Error("Parent not found with ID: " + String(params.parentNodeId));
-  assertNodeWritable(parent, params);
-  if (!("appendChild" in parent)) throw new Error("Parent cannot contain children");
+  if (!("insertChild" in parent) && !("appendChild" in parent)) throw new Error("Parent cannot contain children");
   const cloned = node.clone();
   try {
-    parent.appendChild(cloned);
     const dx = Number(params.dx === undefined || params.dx === null ? 0 : params.dx);
     const dy = Number(params.dy === undefined || params.dy === null ? 0 : params.dy);
-    if ("x" in cloned && "y" in cloned) { cloned.x = Number(cloned.x) + dx; cloned.y = Number(cloned.y) + dy; }
+    const index = params.index !== undefined && params.index !== null ? Math.max(0, Math.floor(Number(params.index))) : null;
+    appendNodeTo(parent, cloned, index);
+    applyNodePosition(cloned, parent, undefined, undefined, dx, dy);
+    if (params.name !== undefined && params.name !== null) cloned.name = String(params.name);
     let containingPage = parent;
     while (containingPage && containingPage.type !== "PAGE") containingPage = containingPage.parent;
     if (containingPage && figma.currentPage && containingPage.id === figma.currentPage.id) {
@@ -1884,11 +1939,59 @@ async function cloneNodeIntoParent(params) {
   }
 }
 
+async function moveNodeToPage(params) {
+  if (!params || !params.nodeId) throw new Error("Missing nodeId parameter");
+  if (!params || !params.targetPageId) throw new Error("Missing targetPageId parameter");
+  const node = await figma.getNodeByIdAsync(String(params.nodeId));
+  if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
+  const page = await figma.getNodeByIdAsync(String(params.targetPageId));
+  if (!page) throw new Error("Target page not found with ID: " + String(params.targetPageId));
+  if (page.type !== "PAGE") throw new Error("Target node is not a PAGE");
+  if (node.type === "PAGE") throw new Error("Cannot move a PAGE into another page");
+  if (!("appendChild" in page)) throw new Error("Target page cannot contain children");
+  const copy = params.copy === true;
+  if (node.parent && node.parent.id === page.id && !copy) {
+    return { success: true, moved: false, copied: false, nodeId: node.id, targetPageId: page.id, reason: "already on target page" };
+  }
+  let target = node;
+  if (copy) {
+    if (!("clone" in node)) throw new Error("Node does not support clone");
+    target = node.clone();
+  }
+  if (target.type === "GROUP") {
+    throw new Error("Groups cannot be placed directly on a page. Ungroup the group first, or move/copy individual child frames instead.");
+  }
+  if (params.name !== undefined && params.name !== null) target.name = String(params.name);
+  try {
+    page.appendChild(target);
+    if ("x" in target && "y" in target) {
+      target.x = Number(target.x);
+      target.y = Number(target.y);
+    }
+    let containingPage = target;
+    while (containingPage && containingPage.type !== "PAGE") containingPage = containingPage.parent;
+    if (containingPage && figma.currentPage && containingPage.id === figma.currentPage.id) {
+      figma.currentPage.selection = [target];
+      figma.viewport.scrollAndZoomIntoView([target]);
+    }
+    return {
+      success: true,
+      moved: !copy,
+      copied: copy,
+      nodeId: target.id,
+      targetPageId: page.id,
+      originalNodeId: copy ? node.id : null
+    };
+  } catch (err) {
+    if (copy && target && "remove" in target) { try { target.remove(); } catch (_) {} }
+    throw err;
+  }
+}
+
 async function setCornerRadius(params) {
   if (!params || !params.nodeId) throw new Error("Missing nodeId parameter");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
-  assertNodeWritable(node, params);
   const radius = Number(params.radius);
   if (!Number.isFinite(radius)) throw new Error("Missing or invalid radius");
   if (!("cornerRadius" in node)) throw new Error("Node does not support cornerRadius");
@@ -1911,7 +2014,6 @@ async function setTextContent(params) {
   if (!params || !params.nodeId) throw new Error("Missing nodeId parameter");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node || node.type !== "TEXT") throw new Error("Node not found or not a TEXT node");
-  assertNodeWritable(node, params);
   await loadTextFont(node);
   node.characters = params.characters === undefined || params.characters === null ? "" : String(params.characters);
   return { success: true, nodeId: node.id, characters: node.characters };
@@ -1926,7 +2028,6 @@ async function setMultipleTextContents(params) {
     if (!u || !u.nodeId) continue;
     const node = await figma.getNodeByIdAsync(String(u.nodeId));
     if (!node || node.type !== "TEXT") continue;
-    assertNodeWritable(node, params);
     await loadTextFont(node);
     node.characters = u.characters === undefined || u.characters === null ? "" : String(u.characters);
     updated += 1;
@@ -2242,7 +2343,6 @@ async function applyFillStyle(params) {
   if (!params.styleId) throw new Error("Missing styleId");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
-  assertNodeWritable(node, params);
   if (!("fills" in node)) throw new Error("Node does not support fills");
   await setFillStyleId(node, String(params.styleId));
   return { success: true, nodeId: node.id, styleId: String(params.styleId) };
@@ -2253,7 +2353,6 @@ async function applyStrokeStyle(params) {
   if (!params.styleId) throw new Error("Missing styleId");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
-  assertNodeWritable(node, params);
   if (!("strokes" in node)) throw new Error("Node does not support strokes");
   await setStrokeStyleId(node, String(params.styleId));
   return { success: true, nodeId: node.id, styleId: String(params.styleId) };
@@ -2264,7 +2363,6 @@ async function applyEffectStyle(params) {
   if (!params.styleId) throw new Error("Missing styleId");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
-  assertNodeWritable(node, params);
   if (!("effects" in node)) throw new Error("Node does not support effects");
   await setEffectStyleId(node, String(params.styleId));
   return { success: true, nodeId: node.id, styleId: String(params.styleId) };
@@ -2275,7 +2373,6 @@ async function applyTextStyle(params) {
   if (!params.styleId) throw new Error("Missing styleId");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
-  assertNodeWritable(node, params);
   if (node.type !== "TEXT") throw new Error("Node is not a TEXT node");
   await safeLoadFont("Inter", "Regular");
   await setTextStyleId(node, String(params.styleId));
@@ -2287,7 +2384,6 @@ async function applyGridStyle(params) {
   if (!params.styleId) throw new Error("Missing styleId");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
-  assertNodeWritable(node, params);
   if (!("layoutGrids" in node)) throw new Error("Node does not support layoutGrids");
   await setGridStyleId(node, String(params.styleId));
   return { success: true, nodeId: node.id, styleId: String(params.styleId) };
@@ -2301,7 +2397,6 @@ async function setAutoLayout(params) {
   if (!params || !params.frameId) throw new Error("Missing frameId");
   const node = await figma.getNodeByIdAsync(String(params.frameId));
   if (!node) throw new Error("Node not found with ID: " + String(params.frameId));
-  assertNodeWritable(node, params);
   if (!("layoutMode" in node)) throw new Error("Node does not support auto layout");
   if (params.layoutMode !== undefined && params.layoutMode !== null) node.layoutMode = String(params.layoutMode);
   if (params.layoutWrap !== undefined && params.layoutWrap !== null && "layoutWrap" in node) node.layoutWrap = String(params.layoutWrap);
@@ -2326,7 +2421,6 @@ async function setLayoutMode(params) {
   if (!params || !params.nodeId) throw new Error("Missing nodeId");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
-  assertNodeWritable(node, params);
   if (!("layoutMode" in node)) throw new Error("Node does not support auto layout");
   node.layoutMode = String(params.layoutMode || "NONE");
   if (params.layoutWrap !== undefined && "layoutWrap" in node) node.layoutWrap = String(params.layoutWrap);
@@ -2337,7 +2431,6 @@ async function setPadding(params) {
   if (!params || !params.nodeId) throw new Error("Missing nodeId");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
-  assertNodeWritable(node, params);
   if (!("paddingTop" in node)) throw new Error("Node does not support auto layout padding");
   if (params.top !== undefined) node.paddingTop = Number(params.top);
   if (params.right !== undefined) node.paddingRight = Number(params.right);
@@ -2350,7 +2443,6 @@ async function setAxisAlign(params) {
   if (!params || !params.nodeId) throw new Error("Missing nodeId");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
-  assertNodeWritable(node, params);
   if (!("primaryAxisAlignItems" in node)) throw new Error("Node does not support auto layout alignment");
   if (params.primaryAxisAlignItems !== undefined) node.primaryAxisAlignItems = String(params.primaryAxisAlignItems);
   if (params.counterAxisAlignItems !== undefined) node.counterAxisAlignItems = String(params.counterAxisAlignItems);
@@ -2361,7 +2453,6 @@ async function setLayoutSizing(params) {
   if (!params || !params.nodeId) throw new Error("Missing nodeId");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
-  assertNodeWritable(node, params);
   if ("primaryAxisSizingMode" in node && params.primaryAxisSizingMode !== undefined) node.primaryAxisSizingMode = String(params.primaryAxisSizingMode);
   if ("counterAxisSizingMode" in node && params.counterAxisSizingMode !== undefined) node.counterAxisSizingMode = String(params.counterAxisSizingMode);
   if ("layoutSizingHorizontal" in node && params.layoutSizingHorizontal !== undefined) node.layoutSizingHorizontal = String(params.layoutSizingHorizontal);
@@ -2373,7 +2464,6 @@ async function setItemSpacing(params) {
   if (!params || !params.nodeId) throw new Error("Missing nodeId");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
-  assertNodeWritable(node, params);
   if (!("itemSpacing" in node)) throw new Error("Node does not support auto layout itemSpacing");
   node.itemSpacing = Number(params.itemSpacing);
   return { success: true, nodeId: node.id, itemSpacing: node.itemSpacing };
@@ -2383,7 +2473,6 @@ async function setLayoutGrids(params) {
   if (!params || !params.frameId) throw new Error("Missing frameId");
   const node = await figma.getNodeByIdAsync(String(params.frameId));
   if (!node) throw new Error("Node not found with ID: " + String(params.frameId));
-  assertNodeWritable(node, params);
   if (!("layoutGrids" in node)) throw new Error("Node does not support layoutGrids");
   const layoutGrids = ensureArray(params.layoutGrids);
   node.layoutGrids = layoutGrids;
@@ -2394,7 +2483,6 @@ async function setOverflowDirection(params) {
   if (!params || !params.frameId) throw new Error("Missing frameId");
   const node = await figma.getNodeByIdAsync(String(params.frameId));
   if (!node) throw new Error("Node not found with ID: " + String(params.frameId));
-  assertNodeWritable(node, params);
   if (!("overflowDirection" in node)) throw new Error("Node does not support overflowDirection");
   node.overflowDirection = String(params.overflowDirection || "NONE");
   return { success: true, frameId: node.id, overflowDirection: node.overflowDirection };
@@ -2404,7 +2492,6 @@ async function setFixedChildren(params) {
   if (!params || !params.frameId) throw new Error("Missing frameId");
   const node = await figma.getNodeByIdAsync(String(params.frameId));
   if (!node) throw new Error("Node not found with ID: " + String(params.frameId));
-  assertNodeWritable(node, params);
   if (!("children" in node) || !("numberOfFixedChildren" in node)) throw new Error("Node does not support fixed children");
   const ids = ensureArray(params.fixedChildIds).map((x) => String(x));
   const set = new Set(ids);
@@ -2496,7 +2583,6 @@ async function createComponentFromNodeAction(params) {
   if (source.type === "COMPONENT" || source.type === "COMPONENT_SET" || source.type === "INSTANCE") {
     throw new Error("Node type cannot be converted into a component: " + source.type);
   }
-  assertNodeWritable(source, params);
   const component = figma.createComponentFromNode(source);
   if (params.name !== undefined && params.name !== null) component.name = String(params.name);
   figma.currentPage.selection = [component];
@@ -2559,7 +2645,6 @@ async function setVariantPropertiesAction(params) {
   const properties = p.properties && typeof p.properties === "object" ? p.properties : null;
   if (!properties) throw new Error("Missing properties");
   const component = await resolveComponentAuthoringNode(p, { allowComponent: true, allowSet: false });
-  assertNodeWritable(component, p);
   component.name = formatVariantComponentName(properties);
   return {
     success: true,
@@ -2601,7 +2686,6 @@ async function addComponentPropertyAction(params) {
   if (type === "VARIANT" && owner.type !== "COMPONENT_SET") {
     throw new Error("VARIANT properties must be added on a COMPONENT_SET");
   }
-  assertNodeWritable(owner, p);
   const defaultValue = normalizeComponentPropertyDefaultValue(type, p.defaultValue);
   const options = {};
   if (type === "INSTANCE_SWAP" && p.preferredValues !== undefined) {
@@ -2628,7 +2712,6 @@ async function editComponentPropertyAction(params) {
     allowSet: true,
     preferSet: p.preferComponentSet !== false
   });
-  assertNodeWritable(owner, p);
   const definitions = owner.componentPropertyDefinitions || {};
   const current = definitions[propertyName];
   if (!current) throw new Error("Component property not found: " + propertyName);
@@ -2657,7 +2740,6 @@ async function deleteComponentPropertyAction(params) {
     allowSet: true,
     preferSet: p.preferComponentSet !== false
   });
-  assertNodeWritable(owner, p);
   owner.deleteComponentProperty(propertyName);
   return {
     success: true,
@@ -2673,7 +2755,6 @@ async function bindComponentPropertyAction(params) {
   const field = p.field === undefined || p.field === null ? "" : String(p.field);
   if (!field) throw new Error("Missing field");
   const node = await getNodeByIdAsync(normalizeFigmaNodeId(p.nodeId));
-  assertNodeWritable(node, p);
   if (!("componentPropertyReferences" in node)) {
     throw new Error("Node does not support componentPropertyReferences");
   }
@@ -2718,7 +2799,6 @@ async function bindComponentPropertyAction(params) {
 async function createComponentSlotAction(params) {
   const p = params && typeof params === "object" ? params : {};
   const component = await resolveComponentNodeForSlot(p);
-  assertNodeWritable(component, p);
   const before = new Set(Object.keys(component.componentPropertyDefinitions || {}));
   const slot = component.createSlot();
   if (p.name !== undefined && p.name !== null) slot.name = String(p.name);
@@ -2775,7 +2855,6 @@ async function resolveSlotNode(params) {
 async function editComponentSlotAction(params) {
   const p = params && typeof params === "object" ? params : {};
   const slot = await resolveSlotNode(p);
-  assertNodeWritable(slot, p);
   if (p.name !== undefined && p.name !== null) slot.name = String(p.name);
   if (p.width !== undefined && p.height !== undefined && "resize" in slot) {
     slot.resize(Number(p.width), Number(p.height));
@@ -2795,7 +2874,6 @@ async function editComponentSlotAction(params) {
 async function deleteComponentSlotAction(params) {
   const p = params && typeof params === "object" ? params : {};
   const slot = await resolveSlotNode(p);
-  assertNodeWritable(slot, p);
   const owner = await findOwningComponentForSlot(slot);
   const slotNodeId = slot.id;
   const before = serializeComponentPropertyDefinitions(owner.componentPropertyDefinitions);
@@ -2863,7 +2941,6 @@ async function createInstanceFromInstance(params) {
   const src = await figma.getNodeByIdAsync(String(params.instanceId));
   if (!src) throw new Error("Node not found with ID: " + String(params.instanceId));
   if (src.type !== "INSTANCE") throw new Error("Source node is not an INSTANCE");
-  assertNodeWritable(src, params);
   const main = await getMainComponentForInstance(src);
   if (!main) throw new Error("Instance has no mainComponent");
   const instance = main.createInstance();
@@ -2929,6 +3006,7 @@ async function importComponentByKey(params) {
   if (!params || !params.componentKey) throw new Error("Missing componentKey parameter");
   const key = String(params.componentKey);
   const component = await figma.importComponentByKeyAsync(key);
+  if (params.name !== undefined && params.name !== null && component) component.name = String(params.name);
   return { success: true, componentId: component.id, componentKey: component.key || key, name: component.name, remote: Boolean(component.remote) };
 }
 
@@ -2936,6 +3014,7 @@ async function importComponentSetByKey(params) {
   if (!params || !params.componentSetKey) throw new Error("Missing componentSetKey parameter");
   const key = String(params.componentSetKey);
   const set = await figma.importComponentSetByKeyAsync(key);
+  if (params.name !== undefined && params.name !== null && set) set.name = String(params.name);
   const def = set.defaultVariant || null;
   return {
     success: true, componentSetId: set.id, componentSetKey: set.key || key,
@@ -2986,7 +3065,6 @@ async function setInstanceProperties(params) {
   const node = await figma.getNodeByIdAsync(String(params.instanceId));
   if (!node) throw new Error("Node not found with ID: " + String(params.instanceId));
   if (node.type !== "INSTANCE") throw new Error("Node is not an INSTANCE");
-  assertNodeWritable(node, params);
   const componentProps = node.componentProperties || {};
   const nextProps = {};
   for (const key in props) {
@@ -3012,7 +3090,6 @@ async function swapInstanceComponent(params) {
   const node = await figma.getNodeByIdAsync(String(params.instanceId));
   if (!node) throw new Error("Node not found with ID: " + String(params.instanceId));
   if (node.type !== "INSTANCE") throw new Error("Node is not an INSTANCE");
-  assertNodeWritable(node, params);
   const component = await figma.importComponentByKeyAsync(String(params.newComponentKey));
   node.swapComponent(component);
   return { success: true, instanceId: node.id, newComponentId: component.id };
@@ -3038,14 +3115,12 @@ async function appendToSlot(params) {
   const slot = await figma.getNodeByIdAsync(String(params.slotNodeId));
   if (!slot) throw new Error("Node not found with ID: " + String(params.slotNodeId));
   if (slot.type !== "SLOT") throw new Error("Node is not a SLOT");
-  assertNodeWritable(slot, params);
   if (!("appendChild" in slot)) throw new Error("Slot does not support children");
   const nodeIds = ensureArray(params.nodeIds).map((x) => String(x));
   const moved = [];
   for (let i = 0; i < nodeIds.length; i += 1) {
     const n = await figma.getNodeByIdAsync(nodeIds[i]);
     if (!n) throw new Error("Node not found with ID: " + nodeIds[i]);
-    assertNodeWritable(n, params);
     slot.appendChild(n);
     moved.push(n.id);
   }
@@ -3351,7 +3426,6 @@ async function setReactions(params) {
   if (!params || !params.nodeId) throw new Error("Missing nodeId");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
-  assertNodeWritable(node, params);
   if (!("reactions" in node)) throw new Error("Node does not support reactions");
   const reactions = ensureArray(params.reactions).map((r) => normalizeReaction(r));
   node.reactions = reactions;
@@ -3362,7 +3436,6 @@ async function clearReactions(params) {
   if (!params || !params.nodeId) throw new Error("Missing nodeId");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
-  assertNodeWritable(node, params);
   if (!("reactions" in node)) throw new Error("Node does not support reactions");
   node.reactions = [];
   return { success: true, nodeId: node.id, reactionsCount: 0 };
@@ -3372,7 +3445,6 @@ async function upsertReaction(params) {
   if (!params || !params.nodeId) throw new Error("Missing nodeId");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
-  assertNodeWritable(node, params);
   if (!("reactions" in node)) throw new Error("Node does not support reactions");
   const match = params.match && typeof params.match === "object" ? params.match : {};
   const triggerType = match.triggerType === undefined || match.triggerType === null ? "" : String(match.triggerType);
@@ -3431,7 +3503,6 @@ async function setTransitionReaction(params) {
   }
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
-  assertNodeWritable(node, params);
   if (!("reactions" in node)) throw new Error("Node does not support reactions");
   const current = ensureArray(node.reactions);
   current.push(reaction);
@@ -3473,7 +3544,6 @@ async function setOverlaySettings(params) {
   const p = params && typeof params === "object" ? params : {};
   if (!p.nodeId) throw new Error("Missing nodeId");
   const node = await getNodeByIdAsync(normalizeFigmaNodeId(String(p.nodeId)));
-  assertNodeWritable(node, p);
   if (!("overlayPositionType" in node)) throw new Error("Node does not support overlay settings");
   if (p.overlayPositionType !== undefined && p.overlayPositionType !== null) {
     const value = String(p.overlayPositionType);
@@ -3673,7 +3743,6 @@ async function bindColorVariableToFill(params) {
   if (!params.variableId) throw new Error("Missing variableId");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
-  assertNodeWritable(node, params);
   if (!("fills" in node)) throw new Error("Node does not support fills");
   const v = await figma.variables.getVariableByIdAsync(String(params.variableId));
   if (!v) throw new Error("Variable not found: " + String(params.variableId));
@@ -3690,7 +3759,6 @@ async function bindColorVariableToStroke(params) {
   if (!params.variableId) throw new Error("Missing variableId");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
-  assertNodeWritable(node, params);
   if (!("strokes" in node)) throw new Error("Node does not support strokes");
   const v = await figma.variables.getVariableByIdAsync(String(params.variableId));
   if (!v) throw new Error("Variable not found: " + String(params.variableId));
@@ -3709,7 +3777,6 @@ async function bindVariableToProperty(params) {
   if (!property) throw new Error("Missing property");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
-  assertNodeWritable(node, params);
   const v = await figma.variables.getVariableByIdAsync(String(params.variableId));
   if (!v) throw new Error("Variable not found: " + String(params.variableId));
   if (!("setBoundVariable" in node)) throw new Error("Node does not support bound variables");
@@ -3723,7 +3790,6 @@ async function setNodeExplicitVariableMode(params) {
   if (!params.modeId) throw new Error("Missing modeId");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
-  assertNodeWritable(node, params);
   if (!("setExplicitVariableModeForCollection" in node)) throw new Error("Node does not support explicit variable modes");
   const collection = await figma.variables.getVariableCollectionByIdAsync(String(params.collectionId));
   if (!collection) throw new Error("Variable collection not found: " + String(params.collectionId));
@@ -4095,7 +4161,6 @@ async function setImageFill(params) {
   if (!params || !params.nodeId) throw new Error("Missing nodeId");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
-  assertNodeWritable(node, params);
   if (!("fills" in node)) throw new Error("Node does not support fills");
   const image = params.imageBytes
     ? figma.createImage(base64ToBytes(String(params.imageBytes)))
@@ -4149,7 +4214,6 @@ async function setGradientFill(params) {
   if (!params || !params.nodeId) throw new Error("Missing nodeId");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
-  assertNodeWritable(node, params);
   if (!("fills" in node)) throw new Error("Node does not support fills");
   const gradientType = params.gradientType ? String(params.gradientType).toUpperCase() : "LINEAR";
   const figmaType = GRADIENT_TYPES[gradientType];
@@ -4196,7 +4260,6 @@ async function setEffects(params) {
   if (!params || !params.nodeId) throw new Error("Missing nodeId");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
-  assertNodeWritable(node, params);
   if (!("effects" in node)) throw new Error("Node does not support effects");
   if (params.effectStyleId) {
     node.effects = [];
@@ -4259,7 +4322,6 @@ async function setVectorPaths(params) {
   if (!params || !params.nodeId) throw new Error("Missing nodeId");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
-  assertNodeWritable(node, params);
   if (!("vectorPaths" in node)) throw new Error("Node does not support vectorPaths");
   node.vectorPaths = normalizeVectorPaths(params.vectorPaths);
   return { success: true, nodeId: node.id, pathCount: node.vectorPaths.length };
@@ -4340,12 +4402,30 @@ async function createSection(params) {
   return { nodeId: section.id, name: section.name, type: section.type };
 }
 
+async function setSectionProperties(params) {
+  if (!params || !params.nodeId) throw new Error("Missing nodeId parameter");
+  const section = await figma.getNodeByIdAsync(String(params.nodeId));
+  if (!section) throw new Error("Node not found with ID: " + String(params.nodeId));
+  if (section.type !== "SECTION") throw new Error("Node is not a SECTION node");
+  if (!("sectionProperties" in section)) throw new Error("Node does not support sectionProperties");
+  let next = { ...(section.sectionProperties || {}) };
+  if (params.sectionType !== undefined && params.sectionType !== null) {
+    next.sectionType = String(params.sectionType);
+  }
+  if (params.sectionProperties && typeof params.sectionProperties === "object") {
+    next = { ...next, ...params.sectionProperties };
+  }
+  if (JSON.stringify(next) !== JSON.stringify(section.sectionProperties || {})) {
+    section.sectionProperties = next;
+  }
+  return { success: true, nodeId: section.id, sectionProperties: section.sectionProperties };
+}
+
 async function setTextStyle(params) {
   if (!params || !params.nodeId) throw new Error("Missing nodeId");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
   if (node.type !== "TEXT") throw new Error("Node is not a TEXT node");
-  assertNodeWritable(node, params);
   await loadTextFont(node);
   if (params.textStyleId) await setTextStyleId(node, String(params.textStyleId));
   if (params.fontFamily !== undefined || params.fontStyle !== undefined) {
@@ -4387,7 +4467,17 @@ async function createPage(params) {
   const page = figma.createPage();
   page.name = name;
   figma.root.appendChild(page);
-  return { success: true, pageId: page.id, name: page.name };
+  if (params && params.activate === true) figma.currentPage = page;
+  return { success: true, pageId: page.id, name: page.name, activated: Boolean(params && params.activate === true) };
+}
+
+function nextDuplicateName(base, existingNames) {
+  const source = String(base);
+  const known = new Set((existingNames || []).map((n) => String(n)));
+  if (!known.has(source)) return source;
+  let i = 2;
+  while (known.has(source + " " + i)) i += 1;
+  return source + " " + i;
 }
 
 async function renamePage(params) {
@@ -4415,7 +4505,10 @@ async function duplicatePage(params) {
   const clone = node.clone();
   const parent = node.parent || figma.root;
   if (parent && parent !== clone.parent && "appendChild" in parent) parent.appendChild(clone);
-  return { success: true, pageId: node.id, newPageId: clone.id, name: clone.name };
+  const explicitName = params.name !== undefined && params.name !== null ? String(params.name) : null;
+  clone.name = explicitName || nextDuplicateName(node.name, figma.root.children.map((p) => p.name));
+  if (params.activate === true) figma.currentPage = clone;
+  return { success: true, pageId: node.id, newPageId: clone.id, name: clone.name, activated: Boolean(params && params.activate === true) };
 }
 
 async function setCurrentPage(params) {
@@ -4431,7 +4524,7 @@ async function reorderPage(params) {
   if (params.index === undefined || params.index === null) throw new Error("Missing index");
   const node = await getNodeByIdAsync(String(params.pageId));
   if (node.type !== "PAGE") throw new Error("Node is not a PAGE");
-  const index = Math.max(0, Math.floor(Number(params.index)));
+  const index = Math.min(Math.max(0, Math.floor(Number(params.index))), figma.root.children.length);
   figma.root.insertChild(index, node);
   return { success: true, pageId: node.id, index };
 }
@@ -4856,7 +4949,6 @@ async function distributeNodes(params) {
   for (const id of ids) {
     const node = await figma.getNodeByIdAsync(id);
     if (!node) throw new Error("Node not found: " + id);
-    assertNodeWritable(node, p);
     nodes.push(node);
   }
   const axis = String(p.axis || "horizontal").toLowerCase() === "vertical" ? "vertical" : "horizontal";
@@ -4921,6 +5013,9 @@ async function distributeNodes(params) {
 
   const results = [];
   for (const n of sorted) {
+    if (isAutoLayoutParent(n.parent)) {
+      try { n.layoutPositioning = "ABSOLUTE"; } catch (_) {}
+    }
     let cross = getCross(n);
     if (crossAlign === "start") cross = bounds.minCross;
     else if (crossAlign === "center") cross = bounds.minCross + Math.max(0, (bounds.maxCross - bounds.minCross - getCrossSize(n)) / 2);
@@ -4938,9 +5033,16 @@ async function arrangeChildren(params) {
   if (!p.parentNodeId) throw new Error("Missing parentNodeId");
   const parent = await figma.getNodeByIdAsync(normalizeFigmaNodeId(String(p.parentNodeId)));
   if (!parent) throw new Error("Parent not found: " + p.parentNodeId);
-  assertNodeWritable(parent, p);
   if (!("children" in parent) || !parent.children.length) throw new Error("Parent has no children");
   if (parent.children.length < 2) throw new Error("Parent needs at least 2 children");
+  if (isAutoLayoutParent(parent)) {
+    return {
+      success: true,
+      skipped: true,
+      arrangedParentNodeId: parent.id,
+      reason: "Parent is an auto-layout container; its children are positioned automatically. Reorder children with reparent_node index, or use set_* layout tools instead."
+    };
+  }
   const sub = Object.assign({}, p, { nodeIds: parent.children.map((c) => c.id), parentNodeId: undefined });
   const result = await distributeNodes(sub);
   result.arrangedParentNodeId = parent.id;
@@ -5325,7 +5427,6 @@ async function extractComponentSet(params) {
   for (const id of ids) {
     const node = await figma.getNodeByIdAsync(id);
     if (!node) throw new Error("Node not found: " + id);
-    assertNodeWritable(node, p);
     if (node.type === "COMPONENT") { components.push(node); continue; }
     if (node.type === "COMPONENT_SET" || node.type === "INSTANCE") throw new Error("Cannot convert " + node.type + " into a variant: " + id);
     if (!node.parent || !("appendChild" in node.parent)) throw new Error("Node has no valid parent: " + id);
@@ -5380,6 +5481,7 @@ const TARGET_SCOPED_ACTIONS = {
   delete_multiple_nodes: (p) => ensureArray(p.nodeIds),
   clone_node: (p) => [p.nodeId],
   clone_node_into_parent: (p) => [p.nodeId, p.parentNodeId],
+  move_node_to_page: (p) => [p.nodeId],
   reparent_node: (p) => [p.nodeId, p.newParentId],
   insert_child: (p) => [p.parentId, p.childId],
   append_to_slot: (p) => [p.slotNodeId].concat(ensureArray(p.nodeIds)),
@@ -5408,6 +5510,7 @@ const TARGET_SCOPED_ACTIONS = {
   group_nodes: (p) => ensureArray(p.nodeIds).concat(p.parentNodeId ? [p.parentNodeId] : []),
   ungroup_node: (p) => [p.nodeId],
   create_section: (p) => (p.parentNodeId ? [p.parentNodeId] : []),
+  set_section_properties: (p) => [p.nodeId],
   create_vector: (p) => (p.parentNodeId ? [p.parentNodeId] : []),
   set_vector_paths: (p) => [p.nodeId],
   distribute_nodes: (p) => ensureArray(p.nodeIds),
@@ -5485,7 +5588,7 @@ const ALLOWED_ACTIONS = new Set([
   "set_auto_layout", "set_layout_grids", "set_overflow_direction", "set_fixed_children",
   "move_node", "reparent_node", "get_parent_chain", "insert_child", "resize_node",
   "delete_node", "delete_multiple_nodes",
-  "clone_node", "clone_node_into_parent",
+  "clone_node", "clone_node_into_parent", "move_node_to_page",
   "set_corner_radius",
   "set_text_content", "set_multiple_text_contents",
   "create_paint_style", "create_text_style", "create_effect_style", "create_grid_style",
@@ -5507,7 +5610,7 @@ const ALLOWED_ACTIONS = new Set([
   "createFrame", "createRectangle", "createText", "setSolidFill",
   "set_image_fill", "set_gradient_fill", "set_effects",
   "create_vector", "set_vector_paths", "boolean_group", "group_nodes", "ungroup_node",
-  "create_section",
+  "create_section", "set_section_properties",
   "set_text_style",
   "create_page", "rename_page", "delete_page", "duplicate_page", "set_current_page", "reorder_page",
   "generate_grid",
@@ -5640,6 +5743,7 @@ async function dispatchAction(action, payload) {
     case "delete_multiple_nodes": return await deleteMultipleNodes(p);
     case "clone_node": return await cloneNode(p);
     case "clone_node_into_parent": return await cloneNodeIntoParent(p);
+    case "move_node_to_page": return await moveNodeToPage(p);
     case "set_corner_radius": return await setCornerRadius(p);
     case "set_text_content": return await setTextContent(p);
     case "set_multiple_text_contents": return await setMultipleTextContents(p);
@@ -5693,7 +5797,6 @@ async function dispatchAction(action, payload) {
 
     case "renameNode": {
       const node = await getNodeByIdAsync(String(p.nodeId));
-      assertNodeWritable(node, p);
       node.name = p.name === undefined || p.name === null ? "" : String(p.name);
       return { nodeId: node.id, name: node.name };
     }
@@ -5702,7 +5805,6 @@ async function dispatchAction(action, payload) {
       const nodeId = p.nodeId ? String(p.nodeId) : null;
       const target = nodeId ? await getNodeByIdAsync(nodeId) : figma.currentPage.selection[0];
       if (!target || target.type !== "TEXT") throw new Error("Select a TEXT node or pass nodeId");
-      assertNodeWritable(target, p);
       await loadTextFont(target);
       target.characters = p.characters === undefined || p.characters === null ? "" : String(p.characters);
       return { nodeId: target.id, characters: target.characters };
@@ -5710,7 +5812,6 @@ async function dispatchAction(action, payload) {
 
     case "setSolidFill": {
       const node = await getNodeByIdAsync(String(p.nodeId));
-      assertNodeWritable(node, p);
       if (!("fills" in node)) throw new Error("Node does not support fills");
       const r = Number(p.r);
       const g = Number(p.g);
@@ -5729,6 +5830,7 @@ async function dispatchAction(action, payload) {
     case "group_nodes": return await groupNodes(p);
     case "ungroup_node": return await ungroupNode(p);
     case "create_section": return await createSection(p);
+    case "set_section_properties": return await setSectionProperties(p);
     case "set_text_style": return await setTextStyle(p);
     case "create_page": return await createPage(p);
     case "rename_page": return await renamePage(p);

@@ -1,4 +1,4 @@
-# Figma Write Bridge (for Designers)
+# Figma Write Bridge
 
 Figma Write Bridge lets a local tool (like an AI assistant or a script) safely “write” into your open Figma file by connecting a Figma plugin to a local bridge server on your computer.
 
@@ -9,21 +9,22 @@ This repo contains:
 
 ---
 
-## What You’ll Use It For (Designer View)
+## What You’ll Use It For
 - Let an assistant generate frames, text, shapes, styles, and structured layouts in your Figma file.
 - Keep control: nothing happens unless your Figma file is open and the plugin is connected.
 
 ## What It Can Do
-- **Frames, text, shapes, sections, and vectors** — create and edit nodes (including `create_section`, `create_vector` from SVG paths, and boolean groups).
+- **Frames, text, shapes, sections, and vectors** — create and edit nodes, including sections (`create_section`, `set_section_properties` to flip `SECTION`/`VIEWPORT`), vectors from SVG paths, and boolean groups.
+- **Move anything anywhere** — `move_node` (absolute `x`/`y` or relative `dx`/`dy`, auto-frees auto-layout children), `reparent_node` / `insert_child` (move any node into/out of frames, sections, groups, auto-layouts, and slots, with an `index` for order), `append_to_slot` (into component slots), `move_node_to_page` (cut or copy to another page), and `clone_node_into_parent` (copy into any container).
 - **Find nodes by query** — `find_nodes` filters the whole document server-side by type, name/text, fill color, style/variable binding, instance overrides, and more (all combinable), so a search like "red button instances" or "hardcoded colors with no style" returns only the matches instead of a full tree dump.
-- **Layout & structure** — auto layout, padding/spacing/alignment, layout grids, one-call grid generators (`generate_grid`), and layout helpers (`distribute_nodes`, `arrange_children`).
+- **Layout & structure** — auto layout, padding/spacing/alignment, layout grids, one-call grid generators (`generate_grid`), and layout helpers (`distribute_nodes`, `arrange_children`, which are auto-layout aware).
 - **Fills & effects** — solid/gradient/image fills (from a URL, base64, or a local file path via `localPath`), shadows and blurs, and applying existing styles or variable-bound colors.
 - **Text styling** — apply existing text styles or set font/font-size/line-height/letter-spacing/case/alignment directly, with variable binding. Generate a whole type scale from a base size + ratio with `create_typography_scale`.
 - **Design tokens** — export local variables as a W3C-style Design Tokens JSON (`export_tokens`) and import a tokens JSON into variables + paint styles (`import_tokens`).
 - **Style guides & palettes** — extract a usage style guide (`get_style_guide`: colors, fonts, sizes, spacing), list fonts used (`get_font_list`), and generate tonal color palettes with swatches/styles/variables (`generate_palette`).
-- **Components** — create/import components and instances, and batch-convert frames into a variant component set (`extract_component_set`).
+- **Components** — create/import components and instances (imports accept a `name` to rename the main node), batch-convert frames into a variant component set (`extract_component_set`), and move/copy a local component to another open file's channel with `move_component_to_file`.
 - **Undo/redo** — snapshot-based `undo` / `redo` for the most recent mutating actions, shared between the agent's tools and Undo/Redo buttons in the plugin UI itself (best-effort; cannot restore deleted nodes or structural changes).
-- **Pages** — create, rename, duplicate, reorder, switch, and delete pages.
+- **Pages** — create, rename, duplicate (auto-names like `Name 2` or takes a `name`), reorder, switch, and delete pages; `create_page` / `duplicate_page` accept `activate: true` to switch to the new page.
 - **Bulk & template work** — `bulk_rename`, `bulk_update`, `replace_all_instances`, and page duplication.
 - **Variables & themes** — create/rename/delete variable modes and collections, and theme-switch whole frames/pages with `set_variable_mode`.
 - **Live push events** — subscribe to `selectionchange` / `documentchange` so the agent can react to your selection or canvas without polling.
@@ -38,7 +39,7 @@ This repo contains:
 
 ---
 
-## Install the Figma Plugin (Development Plugin)
+## Install the Figma Plugin
 1. Open **Figma Desktop**.
 2. Go to **Plugins → Development → Import plugin from manifest…**
 3. Select this file:
@@ -161,6 +162,7 @@ Your external tool can see and select channels per server:
 - Treat this like “edit access”: only run the bridge when you trust the tool/script driving it.
 - Keep a backup: duplicate your Figma file before running large generations/changes.
 - The plugin must remain open; if you close the plugin UI, the connection is lost.
+- **Deleting top-level content requires confirmation**: `delete_node` / `delete_multiple_nodes` refuse to remove a **page**, a **top-level frame**, or a **top-level section** unless you pass `confirmFrameOrPageDeletion: true` — an explicit safety guard against wiping a whole page/frame in one call.
 
 ---
 

@@ -748,9 +748,14 @@ const ALLOWED_MCP_TOOLS = new Set([
   "set_fill_color",
   "set_stroke_color",
   "move_node",
+  "reparent_node",
+  "get_parent_chain",
+  "insert_child",
   "resize_node",
   "clone_node",
   "clone_node_into_parent",
+  "move_node_to_page",
+  "move_component_to_file",
   "delete_node",
   "delete_multiple_nodes",
   "set_corner_radius",
@@ -804,6 +809,7 @@ const ALLOWED_MCP_TOOLS = new Set([
   "group_nodes",
   "ungroup_node",
   "create_section",
+  "set_section_properties",
   "set_text_style",
   "create_page",
   "rename_page",
@@ -1477,13 +1483,14 @@ server.registerTool(
   "import_component_by_key",
   {
     title: "Import component by key",
-    description: "Import a library component into the current file using its componentKey.",
+    description: "Import a library component into the current file using its componentKey. Optionally rename the imported main component.",
     inputSchema: {
-      componentKey: z.string()
+      componentKey: z.string(),
+      name: z.string().optional().describe("New name for the imported main component.")
     }
   },
-  async ({ componentKey }) => {
-    const result = await sendCommand("import_component_by_key", { componentKey });
+  async ({ componentKey, name }) => {
+    const result = await sendCommand("import_component_by_key", { componentKey, name });
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -1492,13 +1499,14 @@ server.registerTool(
   "import_component_set_by_key",
   {
     title: "Import component set by key",
-    description: "Import a library component set into the current file using its componentSetKey.",
+    description: "Import a library component set into the current file using its componentSetKey. Optionally rename the imported main component set.",
     inputSchema: {
-      componentSetKey: z.string()
+      componentSetKey: z.string(),
+      name: z.string().optional().describe("New name for the imported main component set.")
     }
   },
-  async ({ componentSetKey }) => {
-    const result = await sendCommand("import_component_set_by_key", { componentSetKey });
+  async ({ componentSetKey, name }) => {
+    const result = await sendCommand("import_component_set_by_key", { componentSetKey, name });
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -1637,18 +1645,73 @@ server.registerTool(
 );
 
 server.registerTool(
-  "move_node",
+  "reparent_node",
   {
-    title: "Move node",
-    description: "Move a node to a new position.",
+    title: "Reparent node",
+    description: "Move (cut) an existing node into a new parent container (frame, section, group, auto-layout, slot, or page). In auto-layout parents the node joins the flow unless x/y are given (then it is set to absolute positioning).",
     inputSchema: {
       nodeId: z.string(),
+      newParentId: z.string(),
+      index: z.number().int().min(0).optional().describe("Insert at this child index instead of appending at the end. Controls order inside auto-layout containers."),
       x: z.number().optional(),
       y: z.number().optional()
     }
   },
-  async ({ nodeId, x, y }) => {
-    const result = await sendCommand("move_node", { nodeId, x, y });
+  async ({ nodeId, newParentId, index, x, y }) => {
+    const result = await sendCommand("reparent_node", { nodeId, newParentId, index, x, y });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "get_parent_chain",
+  {
+    title: "Get parent chain",
+    description: "Walk up the parent chain of a node, returning id/name/type at each level.",
+    inputSchema: {
+      nodeId: z.string(),
+      stopAtId: z.string().optional(),
+      maxDepth: z.number().optional()
+    }
+  },
+  async ({ nodeId, stopAtId, maxDepth }) => {
+    const result = await sendCommand("get_parent_chain", { nodeId, stopAtId, maxDepth });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "insert_child",
+  {
+    title: "Insert child",
+    description: "Insert an existing child node at an index inside a parent container.",
+    inputSchema: {
+      parentId: z.string(),
+      childId: z.string(),
+      index: z.number().optional()
+    }
+  },
+  async ({ parentId, childId, index }) => {
+    const result = await sendCommand("insert_child", { parentId, childId, index });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "move_node",
+  {
+    title: "Move node",
+    description: "Move a node on the canvas. Pass absolute x/y, or relative dx/dy to nudge. Children of auto-layout containers are automatically switched to absolute positioning so they can move freely.",
+    inputSchema: {
+      nodeId: z.string(),
+      x: z.number().optional().describe("Absolute target x. Omit to keep current and use dx instead."),
+      y: z.number().optional().describe("Absolute target y. Omit to keep current and use dy instead."),
+      dx: z.number().optional().describe("Relative x offset. Applied only when x is omitted."),
+      dy: z.number().optional().describe("Relative y offset. Applied only when y is omitted.")
+    }
+  },
+  async ({ nodeId, x, y, dx, dy }) => {
+    const result = await sendCommand("move_node", { nodeId, x, y, dx, dy });
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -1674,15 +1737,16 @@ server.registerTool(
   "clone_node",
   {
     title: "Clone node",
-    description: "Create a copy of an existing node with optional position offset.",
+    description: "Create a copy of an existing node with optional position offset and name.",
     inputSchema: {
       nodeId: z.string(),
       dx: z.number().optional(),
-      dy: z.number().optional()
+      dy: z.number().optional(),
+      name: z.string().optional().describe("Name for the copy. Defaults to the source name.")
     }
   },
-  async ({ nodeId, dx, dy }) => {
-    const result = await sendCommand("clone_node", { nodeId, dx, dy });
+  async ({ nodeId, dx, dy, name }) => {
+    const result = await sendCommand("clone_node", { nodeId, dx, dy, name });
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -1691,16 +1755,18 @@ server.registerTool(
   "clone_node_into_parent",
   {
     title: "Clone node into parent",
-    description: "Clone a node and append it into a specified parent container.",
+    description: "Clone a node and append it into a specified parent container (frame, section, group, auto-layout, slot, or page). In auto-layout parents the copy joins the flow unless dx/dy are non-zero (then it is set to absolute positioning).",
     inputSchema: {
       nodeId: z.string(),
       parentNodeId: z.string(),
+      index: z.number().int().min(0).optional().describe("Insert the copy at this child index instead of appending at the end."),
       dx: z.number().optional(),
-      dy: z.number().optional()
+      dy: z.number().optional(),
+      name: z.string().optional().describe("Name for the copy. Defaults to the source name.")
     }
   },
-  async ({ nodeId, parentNodeId, dx, dy }) => {
-    const result = await sendCommand("clone_node_into_parent", { nodeId, parentNodeId, dx, dy });
+  async ({ nodeId, parentNodeId, index, dx, dy, name }) => {
+    const result = await sendCommand("clone_node_into_parent", { nodeId, parentNodeId, index, dx, dy, name });
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -1709,13 +1775,14 @@ server.registerTool(
   "delete_node",
   {
     title: "Delete node",
-    description: "Delete a node by nodeId (only within the allowed target frame).",
+    description: "Delete a node by nodeId (only within the allowed target frame). Deleting a page or a top-level frame requires confirmFrameOrPageDeletion: true.",
     inputSchema: {
-      nodeId: z.string()
+      nodeId: z.string(),
+      confirmFrameOrPageDeletion: z.boolean().optional().describe("Required true to delete a PAGE or a top-level FRAME.")
     }
   },
-  async ({ nodeId }) => {
-    const result = await sendCommand("delete_node", { nodeId });
+  async ({ nodeId, confirmFrameOrPageDeletion }) => {
+    const result = await sendCommand("delete_node", { nodeId, confirmFrameOrPageDeletion });
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -1724,13 +1791,14 @@ server.registerTool(
   "delete_multiple_nodes",
   {
     title: "Delete multiple nodes",
-    description: "Delete multiple nodes by nodeIds (only within the allowed target frame).",
+    description: "Delete multiple nodes by nodeIds (only within the allowed target frame). When any nodeId is a page or top-level frame, confirmFrameOrPageDeletion: true is required for that node.",
     inputSchema: {
-      nodeIds: z.array(z.string())
+      nodeIds: z.array(z.string()),
+      confirmFrameOrPageDeletion: z.boolean().optional().describe("Required true when nodeIds include a PAGE or a top-level FRAME.")
     }
   },
-  async ({ nodeIds }) => {
-    const result = await sendCommand("delete_multiple_nodes", { nodeIds });
+  async ({ nodeIds, confirmFrameOrPageDeletion }) => {
+    const result = await sendCommand("delete_multiple_nodes", { nodeIds, confirmFrameOrPageDeletion });
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -1797,6 +1865,125 @@ server.registerTool(
   async () => {
     const result = await sendCommand("list_checkpoints", {});
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "move_node_to_page",
+  {
+    title: "Move node to page",
+    description: "Move (cut) a top-level node to another page, or copy it there (duplicate into page, keeping the original). Set copy: true to keep the original.",
+    inputSchema: {
+      nodeId: z.string(),
+      targetPageId: z.string(),
+      copy: z.boolean().optional().describe("Default false: cut/move the node. true: duplicate it into the target page and keep the original."),
+      name: z.string().optional().describe("Name for the copied node when copy: true. Defaults to the source name.")
+    }
+  },
+  async ({ nodeId, targetPageId, copy, name }) => {
+    const result = await sendCommand("move_node_to_page", { nodeId, targetPageId, copy, name });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "move_component_to_file",
+  {
+    title: "Move component to another file",
+    description: "Import a component or component-set from this file into another connected channel's file, then optionally delete the source (move). Requires the target file to be open with the plugin connected to this server on a different channel (see figma_bridge_status / list_channels). Use mode: 'copy' to keep the source. Accepts componentId, componentKey, or componentName to identify the source.",
+    inputSchema: {
+      targetChannel: z.string().describe("Channel name of the destination file (must be connected on this server)."),
+      componentId: z.string().optional().describe("Source component/component-set node id in this file."),
+      componentKey: z.string().optional().describe("Source component/component-set key (globally unique)."),
+      componentName: z.string().optional().describe("Source component/component-set name in this file (must match exactly one)."),
+      mode: z.enum(["move", "copy"]).optional().describe("Default 'move': delete the source after a successful import. 'copy' keeps it."),
+      name: z.string().optional().describe("New name for the imported component/component-set in the target file.")
+    }
+  },
+  async ({ targetChannel, componentId, componentKey, componentName, mode, name }) => {
+    const targetName = normalizeChannelName(targetChannel);
+    if (!targetName) throw new Error("Invalid targetChannel");
+    const targetSocket = channels.get(targetName);
+    if (!isOpenSocket(targetSocket)) {
+      const known = connectedChannelsInfo().map((c) => c.channel).join(", ");
+      throw new Error(`Channel "${targetName}" is not connected on this server. Connected channels: ${known || "(none)"}`);
+    }
+    const sourceSocket = getActiveSocket();
+    if (!sourceSocket) throw new Error("Figma plugin not connected (source file)");
+    if (targetSocket === sourceSocket) {
+      throw new Error("targetChannel is the same file/channel as the source. Use clone_node / import tools for same-file duplication instead.");
+    }
+    const copy = mode === "copy";
+    const renameTo = name !== undefined && name !== null ? String(name) : null;
+    if (!componentId && !componentKey && !componentName) throw new Error("Provide componentId, componentKey, or componentName");
+
+    let sourceInfo = null;
+    if (componentId || componentName || componentKey) {
+      const listRes = await sendCommand("get_local_components", {}, sourceSocket);
+      const list = Array.isArray(listRes) ? listRes : listRes && Array.isArray(listRes.components) ? listRes.components : null;
+      if (list) {
+        if (componentId) {
+          const found = list.find((c) => c && String(c.id) === String(componentId));
+          if (!found) throw new Error(`Component not found with id ${componentId} in this file`);
+          sourceInfo = found;
+        } else if (componentName) {
+          const found = list.filter((c) => c && String(c.name) === String(componentName));
+          if (found.length === 0) throw new Error(`No component/component-set named "${componentName}" in this file`);
+          if (found.length > 1) throw new Error(`Name "${componentName}" matches ${found.length} components; pass componentId instead`);
+          sourceInfo = found[0];
+        } else if (componentKey) {
+          const found = list.find((c) => c && String(c.key) === String(componentKey));
+          if (found) sourceInfo = found;
+        }
+      }
+      if (sourceInfo && !sourceInfo.key) throw new Error(`Component "${sourceInfo.name}" has no importable key`);
+    }
+    const key = sourceInfo && sourceInfo.key ? sourceInfo.key : componentKey;
+    if (!key) throw new Error("Could not resolve an importable key for the source component");
+
+    let importRes;
+    try {
+      if (sourceInfo && sourceInfo.type === "COMPONENT_SET") {
+        importRes = await sendCommand("import_component_set_by_key", { componentSetKey: key, name: renameTo }, targetSocket);
+      } else {
+        importRes = await sendCommand("import_component_by_key", { componentKey: key, name: renameTo }, targetSocket);
+      }
+    } catch (firstErr) {
+      if (sourceInfo && sourceInfo.type) throw firstErr;
+      try {
+        importRes = await sendCommand("import_component_set_by_key", { componentSetKey: key, name: renameTo }, targetSocket);
+      } catch (secondErr) {
+        throw new Error(`Import failed as component and as component-set: ${firstErr && firstErr.message ? firstErr.message : String(firstErr)}`);
+      }
+    }
+
+    let deletedSource = false;
+    let deleteError = null;
+    if (!copy && sourceInfo && sourceInfo.id) {
+      try {
+        const delRes = await sendCommand("delete_node", { nodeId: sourceInfo.id, confirmFrameOrPageDeletion: true }, sourceSocket);
+        deletedSource = Boolean(delRes && delRes.success);
+      } catch (err) {
+        deleteError = err && err.message ? String(err.message) : String(err);
+      }
+    }
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            success: true,
+            targetChannel: targetName,
+            imported: importRes,
+            mode: copy ? "copy" : "move",
+            deletedSource,
+            deleteError,
+            sourceNotDeletedReason: !sourceInfo && !copy ? "source not present in this file (key-only import)" : undefined
+          })
+        }
+      ]
+    };
   }
 );
 
@@ -3664,6 +3851,23 @@ server.registerTool(
 );
 
 server.registerTool(
+  "set_section_properties",
+  {
+    title: "Set section properties",
+    description: "Edit properties of an existing SECTION node, e.g. sectionType (SECTION | VIEWPORT) or the raw sectionProperties object.",
+    inputSchema: {
+      nodeId: z.string(),
+      sectionType: z.string().optional().describe("Section type: SECTION or VIEWPORT."),
+      sectionProperties: z.any().optional().describe("Raw sectionProperties object to merge onto the section.")
+    }
+  },
+  async ({ nodeId, sectionType, sectionProperties }) => {
+    const result = await sendCommand("set_section_properties", { nodeId, sectionType, sectionProperties });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
   "set_text_style",
   {
     title: "Set text style",
@@ -3700,13 +3904,14 @@ server.registerTool(
   "create_page",
   {
     title: "Create page",
-    description: "Create a new page in the document.",
+    description: "Create a new page in the document. Pass activate: true to also switch to it.",
     inputSchema: {
-      name: z.string().optional()
+      name: z.string().optional(),
+      activate: z.boolean().optional().describe("Set the new page as the current page. Default false.")
     }
   },
-  async ({ name }) => {
-    const result = await sendCommand("create_page", { name });
+  async ({ name, activate }) => {
+    const result = await sendCommand("create_page", { name, activate });
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -3747,13 +3952,15 @@ server.registerTool(
   "duplicate_page",
   {
     title: "Duplicate page",
-    description: "Duplicate a page (including all contents) by pageId.",
+    description: "Duplicate a page (including all contents) by pageId. Auto-suffixes the name (Page 2, Page 3...) unless a name is given. Pass activate: true to switch to the duplicate.",
     inputSchema: {
-      pageId: z.string()
+      pageId: z.string(),
+      name: z.string().optional().describe("Explicit name for the duplicate. Omit to auto-name (base 2, base 3...)."),
+      activate: z.boolean().optional().describe("Set the duplicate as the current page. Default false.")
     }
   },
-  async ({ pageId }) => {
-    const result = await sendCommand("duplicate_page", { pageId });
+  async ({ pageId, name, activate }) => {
+    const result = await sendCommand("duplicate_page", { pageId, name, activate });
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );

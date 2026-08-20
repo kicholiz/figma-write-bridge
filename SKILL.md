@@ -28,6 +28,45 @@ Do not invoke this skill when:
 - the user has not connected the Figma plugin and does not want local Figma edits
 - the user only wants a design spec written in markdown
 
+## Component Reuse First (Mandatory)
+
+**Never build UI from primitives when an existing component could do the job.** This rule applies to every screen, mockup, section, card, button, input, nav bar, modal — anything.
+
+Before calling `create_frame`, `create_rectangle`, `create_text`, or `create_vector` for anything that looks like a UI element (not a bare layout container), you must have already:
+
+1. **Loaded the file's component catalog.** Read `libraries/<fileKey>/file-library.md`. If it doesn't exist, build it first (see "First use in a file"). Do not start generating before the catalog exists — the first screen you build should already reuse the file's real components.
+2. **Matched each planned element against the catalog.** Write out the mapping before you build: "header → `Nav/TopBar` (12:34)", "CTA → `Button` set, Variant=Primary (56:78)". Match on intent, not exact name — a `Card`, `ListItem`, or `Tile` in the catalog covers a "product card" request even if the names differ.
+3. **Instantiated the match** with `create_component_instance` / `create_instance_from_component_key` / `create_instance_from_set_key`, then configured it with `set_instance_properties` — rather than recreating its visual appearance with frames and rectangles.
+
+Primitives are only allowed for:
+- layout containers (the page frame, section wrappers, auto-layout rows/columns) that hold instances
+- genuinely one-off content with no catalog equivalent
+- elements the user explicitly asked you to build from scratch
+
+If a needed element has no catalog match, do not silently draw it from primitives. Say which element had no match and ask whether to create it as a new component (see "Component not found"), or get the user's OK to build it as a one-off.
+
+Also reuse before creating at the token level: apply existing variables and styles from the catalog (`apply_*_style`, `bind_color_variable_to_fill`) instead of hardcoding hex values, sizes, and spacing.
+
+### Building a new component: bind existing variables first
+
+When you do create a new component (after the user confirms), it must be built on the file's existing variables and styles — a new component with hardcoded values is design-system drift, even if the component itself is new.
+
+Before setting any value on the new component:
+
+1. **Read the Variables section of `libraries/<fileKey>/file-library.md`** (and any split `file-library.variables.*.md` for the relevant collection). This is the token vocabulary you must build from.
+2. **Map each property to an existing variable or style** — fills and strokes to COLOR variables, padding/gap/sizing/corner radius to FLOAT variables, typography to an existing text style. State the mapping alongside the component mapping.
+3. **Bind rather than set.** Prefer `bind_color_variable_to_fill` / `bind_color_variable_to_stroke` / `bind_variable_to_property` and `apply_fill_style` / `apply_text_style` / `apply_effect_style` over raw `set_fill_color`, `set_padding`, `set_item_spacing`, and `set_corner_radius` with literal numbers.
+4. **Pick the nearest semantic token, not the nearest hex.** If the design calls for a color close to an existing `color/bg/surface`, use that variable rather than creating a near-duplicate.
+
+Only create new variables or styles when the file genuinely has none that fit — i.e. the collection is empty, or nothing in it is semantically close. When that happens:
+- Tell the user which value had no existing token before creating one.
+- Create it in the file's existing collection (`create_variable` / `create_paint_style`) rather than starting a new collection, unless the user asks otherwise.
+- Append the new variable/style to `libraries/<fileKey>/file-library.md` immediately.
+
+If the file has no variables at all, say so once, then proceed with literal values (or offer `generate_palette` / `create_typography_scale` / `import_tokens` to bootstrap a token set first).
+
+In your final report, state which components you reused (by name), which variables/styles the new component binds to, and list anything you had to build from primitives or hardcode, with the reason.
+
 ## Safety Rules
 
 Follow these rules on every run:
@@ -39,6 +78,7 @@ Follow these rules on every run:
 - Do not delete, reset, clear, or bulk-restructure anything unless the user explicitly asks.
 - Prefer creating new nodes or cloning existing ones over destructive changes.
 - After major edits, re-read the affected nodes to verify the result.
+- Never create a primitive stand-in for something the file already has as a component — see "Component Reuse First (Mandatory)" above; it governs every build task.
 
 Target-frame enforcement:
 - Once `set_target_frame` (or `clear_target_frames`) has been called, the plugin enforces it: edits/deletes on nodes outside the recorded target frame(s) are rejected, and single-target create actions are placed inside the target frame automatically. The server keeps the plugin's copy in sync, so enforcement survives plugin UI reloads.
@@ -73,99 +113,132 @@ A “channel” is the name that ties a plugin UI to the MCP server it routes th
 
 So the routing rule is: **the channel in the plugin UI must equal the `FIGMA_BRIDGE_CHANNEL` of the MCP server it's connected to** (both `default` when unset). You can see the active channel via `figma_bridge_status`, switch it with `join_channel`, and list all connected channels with `list_channels`.
 
-## Component & Variable Library Files
+## File Library (Components + Variables)
 
-To avoid re-reading the full component/variable catalog from Figma on every request (each `get_local_components`, `get_styles`, or `list_variables` round-trip costs tokens), this skill maintains per-file catalog files under `libraries/<fileKey>/` in the project root (where `fileKey` comes from the Figma URL — the segment after `/design/` or `/file/`):
+To avoid re-reading the full component/variable catalog from Figma on every request (each `get_local_components`, `get_styles`, or `list_variables` round-trip costs tokens), this skill maintains one catalog file per Figma file under `libraries/<fileKey>/` in the project root (where `fileKey` comes from the Figma URL — the segment after `/design/` or `/file/`):
 
-- `libraries/<fileKey>/component-library.md`
-- `libraries/<fileKey>/variable-library.md` (plus any `<collection>.md` split files it points to)
+- `libraries/<fileKey>/file-library.md` — every local component and every local variable of that Figma file, in one file (plus any split files it points to — see "Capping large libraries").
 
-`libraries/index.md` maps each file key to its file name/channel (the channel is the one of the MCP server that file is reached through — `default` by default) and library paths. **Read only the libraries for the file you are currently working in** — confirm the file with `get_document_info` (returns `fileKey`) or `figma_bridge_status`, then read `libraries/<fileKey>/...`. Never use another file's catalog.
+`libraries/index.md` maps each file key to its file name/channel (the channel is the one of the MCP server that file is reached through — `default` by default) and the library path. **Read only the library for the file you are currently working in** — confirm the file with `get_document_info` (returns `fileKey`) or `figma_bridge_status`, then read `libraries/<fileKey>/file-library.md`. Never read or use another file's `libraries/<fileKey>/` folder — those catalogs belong to a different Figma file and do not apply here.
+
+**Whenever a Figma file is opened (the first tool call of a session), check for `libraries/<fileKey>/file-library.md` before doing anything else.** If it exists, this file's design system is already cataloged — when creating mockups, screens, or any new UI, prefer instantiating the components listed there over building frames/shapes from primitives. If it doesn't exist yet, build it once (see "First use in a file" below) before generating anything, so the very first screen you build already reuses the file's real components.
 
 ### First use in a file
 
-Before the first read/write of a session, get the current file's key (via `figma_bridge_status` or `get_document_info`) and check whether `libraries/<fileKey>/component-library.md` and `libraries/<fileKey>/variable-library.md` already exist.
+Before the first read/write of a session, get the current file's key (via `figma_bridge_status` or `get_document_info`) and check whether `libraries/<fileKey>/file-library.md` already exists.
 
-If they do **not** exist yet, this is the first time the plugin is being used against this Figma file. Build them now:
+If it does **not** exist yet, this is the first time the plugin is being used against this Figma file. Build it now:
 
 1. Confirm the bridge and file via `figma_bridge_status` and `get_document_info`.
 2. If you don't already know the Figma file's URL (needed to build component links), ask the user for it once. Extract the file key from the URL (the segment after `/design/` or `/file/`).
 3. Call `get_local_components` to enumerate every component and component set in the file (this also returns `description`, `key`, and simplified `componentPropertyDefinitions` — no extra per-component calls needed).
 4. For each component/component set, record: name, type (`COMPONENT` or `COMPONENT_SET`), node id, description if available, its property names/types (from `componentPropertyDefinitions`, omit if none), and a direct Figma URL built as `https://www.figma.com/design/<fileKey>/<file-name>?node-id=<nodeId with ":" replaced by "-">`.
-5. Write `libraries/<fileKey>/component-library.md` as a Markdown table:
+5. Call `list_variable_collections` and `list_variables` to enumerate every variable.
+6. Write `libraries/<fileKey>/file-library.md` with two sections:
 
    ```markdown
-   # Component Library — <file name>
+   # File Library — <file name>
+
+   ## Components
 
    | Name | Type | Description | Properties | Node ID | URL |
    |------|------|-------------|------------|---------|-----|
    | Button | COMPONENT_SET | Primary/secondary/ghost button | Variant: Style(Primary/Secondary/Ghost), Boolean: Disabled | 12:34 | https://www.figma.com/design/... |
-   ```
 
-   The Properties column is a cache of `componentPropertyDefinitions` — read it instead of calling `get_component_property_definitions` or `get_instance_properties` again just to learn what properties a component exposes. Only call those tools live when you need an instance's *current* values, not its schema.
+   ## Variables
 
-6. Call `list_variable_collections` and `list_variables` to enumerate every variable.
-7. Write `libraries/<fileKey>/variable-library.md` as a Markdown table, grouped by collection:
-
-   ```markdown
-   # Variable Library — <file name>
-
-   ## <Collection name> (modes: Light, Dark)
+   ### <Collection name> (modes: Light, Dark)
 
    | Name | Type | Light | Dark |
    |------|------|-------|------|
    | color/bg/primary | COLOR | #FFFFFF | #111111 |
    ```
 
-   If the file has many variables, split this by collection instead of one giant file — see "Capping large libraries" below.
+   The Properties column is a cache of `componentPropertyDefinitions` — read it instead of calling `get_component_property_definitions` or `get_instance_properties` again just to learn what properties a component exposes. Only call those tools live when you need an instance's *current* values, not its schema. The Node ID / URL columns are what let you retrieve or instantiate a component cheaply (`create_instance_from_component_key` / `create_instance_from_set_key` with the key, or the URL to open it) without a live lookup.
 
-8. Add (or update) the row for this file in `libraries/index.md`, then tell the user the library files were created and will be used going forward instead of re-scanning the file.
+7. Add (or update) the row for this file in `libraries/index.md`, then tell the user the file library was created and will be used going forward instead of re-scanning the file.
 
 If a component genuinely has no `description` exposed by the tooling, leave that cell blank rather than guessing.
 
 ### Capping large libraries
 
-Large design systems can blow the same token budget this skill is trying to save. Apply these caps when building or refreshing either file:
-- If `libraries/<fileKey>/variable-library.md` would exceed roughly 150 variable rows total, split it per collection into `libraries/<fileKey>/variable-library.<collection-slug>.md` files instead of one file, and leave a short index in `libraries/<fileKey>/variable-library.md` listing each collection file and its row count.
-- If `libraries/<fileKey>/component-library.md` would exceed roughly 100 rows, group it into sections by page or by name prefix (e.g. `## Atoms`, `## Molecules`) within the same file rather than splitting into multiple files — components are looked up by name/type more often than filtered by collection, so one indexed file stays more useful.
+Large design systems can blow the same token budget this skill is trying to save. Apply these caps when building or refreshing `file-library.md`:
+- If the Variables section would exceed roughly 150 rows total, split it per collection into `libraries/<fileKey>/file-library.variables.<collection-slug>.md` files instead of inlining them, and leave a short index under `## Variables` in `file-library.md` listing each collection file and its row count.
+- If the Components section would exceed roughly 100 rows, group it into subsections by page or by name prefix (e.g. `### Atoms`, `### Molecules`) within `file-library.md` itself rather than splitting into separate files — components are looked up by name/type more often than filtered by collection, so one indexed file stays more useful.
 - When reading a split library back, only read the specific collection/section file relevant to the current task, not every file.
 
 ### Reconcile / prune (trigger: "update library")
 
-The library files only ever get appended to during normal work, so they can drift from the live file (renamed, deleted, or orphaned entries). When the user's message contains phrasing like "update library", "refresh library", or "sync library":
+`file-library.md` only ever gets appended to during normal work, so it can drift from the live file (renamed, deleted, or orphaned entries). When the user's message contains phrasing like "update library", "refresh library", or "sync library":
 1. Re-run `get_local_components` and `list_variable_collections`/`list_variables` fully.
-2. Diff the live results against the existing `libraries/<fileKey>/component-library.md` / `libraries/<fileKey>/variable-library.md` rows by id.
+2. Diff the live results against the existing Components and Variables sections of `libraries/<fileKey>/file-library.md` by id.
 3. Remove rows whose id no longer exists live; update rows whose name/description/properties/value changed; add rows that are new.
-4. Rewrite the file(s) with the reconciled table(s) — don't just append.
+4. Rewrite the file with the reconciled table(s) — don't just append.
 5. Report a one-line diff summary to the user (e.g. "removed 2 stale components, updated 1 description, added 3 new variables") rather than re-printing the whole table.
 
 Do not run this reconcile pass automatically on every turn — only on the explicit trigger phrase above, or when a lookup miss suggests the library is stale (see "Component not found").
 
 ### Every subsequent use
 
-If `libraries/<fileKey>/component-library.md` and/or `libraries/<fileKey>/variable-library.md` already exist for the current file:
-- Read them directly (a plain file read) instead of calling `get_local_components`, `get_styles`, or `list_variables` to answer "what components/variables exist" questions.
+If `libraries/<fileKey>/file-library.md` already exists for the current file:
+- Read it directly (a plain file read) instead of calling `get_local_components`, `get_styles`, or `list_variables` to answer "what components/variables exist" questions.
 - Only fall back to the live tools when:
   - a lookup in the library file misses (see "Component not found" below),
   - the user says the file's components/variables changed, or
   - the library file looks stale/empty relative to what's on canvas.
-- When a live refresh is needed, only re-scan what changed if possible; otherwise re-run the full build steps above and overwrite the corresponding file.
-- Whenever you create a new component, style, or variable, append the new entry to the relevant `libraries/<fileKey>/` file immediately so it stays in sync without a full re-scan next time.
+- When a live refresh is needed, only re-scan what changed if possible; otherwise re-run the full build steps above and overwrite the file.
+- Whenever you create a new component, style, or variable, append the new entry to the relevant section of `libraries/<fileKey>/file-library.md` immediately so it stays in sync without a full re-scan next time.
 
 ### Component not found
 
-If the user asks to use or place a component by name and it is not present in `libraries/<fileKey>/component-library.md` (or, if no library file exists yet, not found via `get_local_components`):
+If the user asks to use or place a component by name and it is not present in `libraries/<fileKey>/file-library.md` (or, if no library file exists yet, not found via `get_local_components`):
 - Do not silently substitute a plain frame/rectangle for it.
 - Ask the user: "I couldn't find a '<name>' component in this file. Would you like me to create it as a new component?"
 - Only proceed to `create_component` / `create_component_from_node` / `combine_as_variants` after they confirm.
-- After creating it, append the new entry to `libraries/<fileKey>/component-library.md` right away.
+- Build it against the file's existing variables and styles — see "Building a new component: bind existing variables first". Do not hardcode colors, spacing, radii, or type when a token exists.
+- After creating it, append the new entry to `libraries/<fileKey>/file-library.md` right away.
+
+## Dev Handoff Annotations (Screens)
+
+**Any screen you create is not finished until it is annotated for dev handoff.** A screen that only looks right is half-delivered — the engineer reading it needs the intent that isn't visible on canvas. Annotate as the final step of building a screen, before you report back, without waiting to be asked.
+
+Use `set_multiple_annotations` (one batched call, not one `set_annotation` per node) with `labelMarkdown` for the note. Note that setting an annotation **replaces** that node's existing annotations, so call `get_annotations` first if you're adding to a screen that already has some, and re-send the merged set.
+
+### What to annotate
+
+Cover these on every screen — skip a category only when it genuinely doesn't apply:
+
+- **The screen frame itself** — what the screen is, its entry point, and any route/state it represents.
+- **Components used** — for each instance, name the source component and the variant/property values set (e.g. "`Button` set — Variant=Primary, Size=Large, Disabled=false"). This is what tells the engineer to reach for the existing coded component instead of rebuilding it.
+- **Interactive elements** — what each button/link/input does: target screen, submit action, validation rules, disabled conditions.
+- **States not drawn on canvas** — loading, empty, error, disabled, hover/focus, and what triggers each. If you only built the happy path, annotate that explicitly rather than leaving it implied.
+- **Content rules** — which text is static vs. dynamic, data source, truncation/overflow behavior, character limits, pluralization, date/number formatting.
+- **Responsive intent** — which elements fill vs. hug, min/max widths, wrap and reflow behavior, breakpoint differences.
+- **Tokens** — where a value is deliberately a specific variable/style, and anything intentionally hardcoded (with the reason).
+- **Accessibility** — heading order, alt text for meaningful images, focus order, label associations, and anything with a non-obvious accessible name.
+- **Open questions** — anything you assumed while building. Annotate the assumption on the node rather than only mentioning it in chat, so it survives the handoff.
+
+Attach each annotation to the **node it describes** (the button, the input, the list) rather than piling everything onto the screen frame. Use `properties` (e.g. width, fill, spacing entries) when you want Figma to pin the live measured value alongside your note instead of restating a number that can drift.
+
+Use `categoryId` consistently if the file has annotation categories — read them with `get_annotations` (`includeCategories: true`) and reuse the existing ones instead of inventing new labels.
+
+### Related handoff setup
+
+While you're finishing a screen, also make sure the prototype layer is coherent, since it's part of what dev reads:
+- `set_reactions` / `upsert_reaction` so interactive elements actually point at their destinations
+- `set_prototype_start_node` / `set_flow_starting_points` so the flow has a named entry point
+
+Keep annotations short and specific — one to three sentences per node. They're a spec, not prose; long paragraphs get ignored on canvas.
+
+If the user explicitly says they don't want annotations, skip them — but say once that the screen is going out without handoff notes.
 
 ## Standard Workflow
 
 ### 0. Load Local Catalogs
-- Get the current file's key (`figma_bridge_status` / `get_document_info`), then check for `libraries/<fileKey>/component-library.md` and `libraries/<fileKey>/variable-library.md`.
-- If present, read them now for context before making any Figma calls.
-- If absent, follow "First use in a file" above once preflight succeeds.
+- Get the current file's key (`figma_bridge_status` / `get_document_info`), then check for `libraries/<fileKey>/file-library.md`.
+- If present, read it now for context before making any Figma calls — every screen/mockup you build this session must be assembled from its cataloged components, not primitives (see "Component Reuse First").
+- If absent, follow "First use in a file" above once preflight succeeds. Do not start building until it exists.
+- Before any build step, plan the element → component mapping against the catalog and state it to the user.
 
 ### 1. Preflight
 Run this fully only once per session (or after a reconnect):
@@ -197,7 +270,7 @@ If no frame exists yet:
 Even after `set_target_frame`, still manually avoid touching unrelated nodes.
 
 ### 3. Inspect Before Editing
-Check `libraries/<fileKey>/component-library.md` / `libraries/<fileKey>/variable-library.md` first for anything about known components, styles, or variables — only fall back to live tools for what those files don't answer:
+Check `libraries/<fileKey>/file-library.md` first for anything about known components, styles, or variables — only fall back to live tools for what it doesn't answer:
 - `get_all_pages` once when you need a map of the whole file, or `get_document_tree` (with `maxDepth`/`excludeTypes`) to read an entire page/frame's structure and text in one compact call instead of many node reads
 - `read_my_design` for rich details on the current selection (pass `maxDepth`/`excludeTypes` to limit the read)
 - `get_node_info` for a single node
@@ -212,14 +285,16 @@ Check `libraries/<fileKey>/component-library.md` / `libraries/<fileKey>/variable
 Prefer this order:
 1. update existing text or instance properties
 2. apply existing styles, variables, or components
-3. create new nodes inside the target frame
+3. instantiate a cataloged component (`create_instance_from_component_key` / `create_instance_from_set_key` / `create_component_instance`) — this is the default way to add UI
 4. clone existing nodes when that preserves structure better
-5. only use deletion if the user explicitly requested it
+5. create new primitive nodes inside the target frame — only for layout containers or elements with no catalog match (see "Component Reuse First")
+6. only use deletion if the user explicitly requested it
 
 ### 5. Verify
 After edits:
 - re-run `get_node_info`, `get_nodes_info`, or `read_my_design`
 - confirm names, text, position, sizing, and styles
+- if you built a screen, confirm it is annotated for dev handoff (`get_annotations`) before reporting done
 - summarize exactly what changed
 
 ## Tool Guide
@@ -246,7 +321,7 @@ For `get_document_tree` the rows are a **pre-order traversal** with a `depth` co
 Pass `verbose: true` to any of the four to get the original array-of-objects (or nested tree) shape back.
 
 ### Read / Inspect
-- `get_document_info`
+- `get_document_info` — current page's name/id/type/fileKey, its child nodes, `currentPage`, plus a `pages` list covering **every** page in the file (id/name/childCount), so one call gives the full-page overview without a separate `get_all_pages`.
 - `get_all_pages` — compact map of every page (id/name/childCount). Pass `includeTopLevel: true` to also list each page's top-level frames. Call once for a full-file overview.
 - `get_document_tree` — compact structural tree of the whole file (or one subtree). Every node is `{id, name, type}`; no extra fields unless requested. Default `maxDepth` is 3 to bound output; pass `fields: ["characters"]` to include TEXT content and a larger `maxDepth` for deeper expansion. Use `rootNodeId` to scope to a frame/page, `excludeTypes: ["VECTOR"]` to drop icon/vector noise, and `fields` to pull extra per-node values (e.g. `["fills","absoluteBoundingBox"]`) only when you need them. Returns a **columnar table** — see below.
 - `get_selection`
@@ -299,7 +374,9 @@ Pass `verbose: true` to any of the four to get the original array-of-objects (or
 
 ### Update Nodes
 - `rename_node`
-- `move_node`
+- `move_node` — absolute `x`/`y` or relative `dx`/`dy`; children of auto-layout parents are switched to absolute positioning so they can move freely
+- `reparent_node` (optional `index`) / `insert_child` — move (cut) any existing node into/out of frames, sections, groups, auto-layouts, slots, and pages; `index` controls order inside auto-layout containers
+- `get_parent_chain`
 - `resize_node`
 - `set_fill_color`
 - `set_stroke_color`
@@ -318,10 +395,12 @@ Pass `verbose: true` to any of the four to get the original array-of-objects (or
 - `boolean_group` — combine 2+ vector nodes (UNION/SUBTRACT/INTERSECT/EXCLUDE)
 - `group_nodes` / `ungroup_node`
 - `create_section` — SECTION node with optional fill and `sectionProperties`
+- `set_section_properties` — edit an existing SECTION's `sectionType` (SECTION|VIEWPORT) or raw `sectionProperties`
 
 ### Pages
-- `create_page` / `rename_page` / `duplicate_page` / `set_current_page` / `reorder_page`
+- `create_page` / `rename_page` / `duplicate_page` / `set_current_page` / `reorder_page` — `create_page` and `duplicate_page` accept `activate: true` to switch to the new page; `duplicate_page` auto-suffixes the name (`Name 2`, `Name 3`…) unless `name` is given
 - `delete_page` (requires `confirmDelete: true`)
+- `move_node_to_page` — move (cut) or copy (`copy: true`) a top-level node (frame/section/component/instance) to another page
 
 ### Bulk Operations
 - `bulk_rename` — find/replace in node names across a subtree (regex + `dryRun` supported)
@@ -345,8 +424,8 @@ Pass `verbose: true` to any of the four to get the original array-of-objects (or
 - `set_layout_sizing`
 - `set_item_spacing`
 - `set_layout_grids`
-- `distribute_nodes` — space/align an arbitrary set of nodes along `axis` (horizontal|vertical): `mode` `gap` (fixed `gap`), `spaceBetween`/`evenly` (fill bounds), or `center`; `crossAlign` none|start|center|end; `bounds {x1,y1,x2,y2}` overrides the default parent-based bounds
-- `arrange_children` — same distribution options applied to the direct children of a `parentNodeId`
+- `distribute_nodes` — space/align an arbitrary set of nodes along `axis` (horizontal|vertical): `mode` `gap` (fixed `gap`), `spaceBetween`/`evenly` (fill bounds), or `center`; `crossAlign` none|start|center|end; `bounds {x1,y1,x2,y2}` overrides the default parent-based bounds. Auto-layout children are switched to absolute positioning first.
+- `arrange_children` — same distribution options applied to the direct children of a `parentNodeId`. On auto-layout parents it is skipped with a notice (layout already arranges them).
 
 ### Design Tokens
 - `export_tokens` — dump all local variables as a W3C-style Design Tokens JSON (nested by collection/variable name, colors as hex) plus a flat `variables` list; `includeModes: false` skips the per-mode views. Handy to snapshot a file's token set for reuse across files or to send to the user as a spec.
@@ -357,8 +436,8 @@ Pass `verbose: true` to any of the four to get the original array-of-objects (or
 - `generate_palette` — build a tonal 50…900 palette (default 10 steps) from a seed `hex`; optionally create paint styles, COLOR variables in a `<Name> Tokens` collection, and a labeled swatch frame. Use to bootstrap a color system quickly.
 
 ### Components And Libraries
-- `import_component_by_key`
-- `import_component_set_by_key`
+- `import_component_by_key` / `import_component_set_by_key` — import into the current file (optional `name` renames the imported main node)
+- `move_component_to_file` — move (or copy with `mode: 'copy'`) a local component/component-set to another connected channel's file by `componentId`/`componentKey`/`componentName`
 - `get_instance_properties`
 - `set_instance_properties`
 - `swap_instance_component`
@@ -441,7 +520,7 @@ Avoid creating replacement text layers if existing text nodes can be updated saf
 
 ### For component-based design systems
 Prefer:
-- checking `libraries/<fileKey>/component-library.md` first for the component's id/key/url before calling any live lookup tool
+- checking `libraries/<fileKey>/file-library.md` first for the component's id/key/url before calling any live lookup tool
 - `get_selection_context` when the user is pointing at something already selected in Figma and you need its full editable surface (properties, slots, bound properties) in one call
 - `scan_instances_with_sources`
 - `get_instance_source`
@@ -450,7 +529,7 @@ Prefer:
 - `set_instance_properties`
 - `create_component_slot` / `edit_component_slot` / `delete_component_slot` for authoring SLOT properties on a component; `get_instance_slots` / `append_to_slot` for filling them on an instance
 
-Avoid detaching or rebuilding instances unless the user explicitly asks. If a named component isn't in `libraries/<fileKey>/component-library.md` or on canvas, ask the user before creating it (see "Component not found" above).
+Avoid detaching or rebuilding instances unless the user explicitly asks. If a named component isn't in `libraries/<fileKey>/file-library.md` or on canvas, ask the user before creating it (see "Component not found" above).
 
 ### For layout work
 Prefer:
@@ -464,12 +543,13 @@ Avoid absolute-positioning everything if auto layout is already being used.
 
 ### For design-system generation
 Prefer:
-- `get_style_guide` first to see what colors/fonts/spacing the file already leans on, then:
+- reading the Variables section of `libraries/<fileKey>/file-library.md` first — build on the tokens that already exist before adding any new ones
+- `get_style_guide` next to see what colors/fonts/spacing the file already leans on, then:
 - `generate_palette` to bootstrap a tonal palette (styles + variables + swatch frame) from one brand hex
 - `create_typography_scale` to build the type ramp instead of dozens of `create_text_style` calls
 - `import_tokens` to apply a full W3C token spec (colors → variables + paint styles), or `export_tokens` to snapshot the file's variables as tokens JSON
 - `extract_component_set` to turn existing frames into a variant component set, then `add_component_property` / `set_variant_properties` to author variant properties
-- update `libraries/<fileKey>/variable-library.md` and `libraries/<fileKey>/component-library.md` after these tools create new variables/styles/components
+- update `libraries/<fileKey>/file-library.md` after these tools create new variables/styles/components
 
 ### For multi-step edits
 When a request decomposes into more than ~3 independent bridge calls (e.g. "make all 5 buttons in this row the same fill and corner radius"), prefer one `run_batch` call over 5 separate tool calls — it's one WebSocket round trip instead of five, and you still get a per-step result/error back. For edits with meaningful blast radius on existing nodes, call `create_checkpoint` on the affected nodeIds first so you have a `restore_checkpoint` fallback if the batch produces something the user doesn't want. For quick single property edits, `undo` / `redo` can reverse the last action without a checkpoint, but don't rely on it across a long batch — checkpoints are the durable restore path.
@@ -485,7 +565,7 @@ Smart Animate itself has no scriptable keyframe/timeline API to call into — it
 
 ### For styling
 Prefer:
-- checking `libraries/<fileKey>/variable-library.md` first for existing tokens before calling `list_variables` or `get_styles`
+- checking `libraries/<fileKey>/file-library.md` first for existing tokens before calling `list_variables` or `get_styles`
 - applying existing styles and variables before creating new local styles
 - `apply_*_style` when a matching style already exists
 - variable binding when the file uses variables semantically
@@ -525,17 +605,20 @@ Only use:
 
 when the user clearly asked for removal or reset-like behavior.
 
+**Deleting top-level content needs explicit confirmation.** `delete_node` / `delete_multiple_nodes` refuse to remove a **page**, a **top-level frame**, or a **top-level section** unless you pass `confirmFrameOrPageDeletion: true` on the same call. When the user asks you to delete such a node, pass that flag; do not surprise-delete large top-level content without it.
+
 ## Recommended Interaction Pattern
 
 Use this sequence for most editing tasks:
-1. Load the current file's `libraries/<fileKey>/component-library.md` / `libraries/<fileKey>/variable-library.md` if present, or build them on first use.
+1. Load the current file's `libraries/<fileKey>/file-library.md` if present, or build it on first use, then map every planned element to a cataloged component before building (see "Component Reuse First" — this step is mandatory, not a preference).
 2. Confirm bridge and file with `figma_bridge_status` and `get_document_info` — skip this step if already confirmed earlier in the session (see Preflight).
 3. Confirm selection with `get_selection`.
 4. Set scope with `set_target_frame`.
 5. Inspect the target node tree with `read_my_design` or `get_node_info` (pass `maxDepth`/`excludeTypes` when you only need a shallow read).
 6. Make the smallest viable edit.
-7. Re-read the affected nodes.
-8. Report what changed and any limitations.
+7. If you built a screen, annotate it for dev handoff (see "Dev Handoff Annotations").
+8. Re-read the affected nodes.
+9. Report what changed and any limitations.
 
 ## Example Playbooks
 
@@ -549,11 +632,14 @@ Use this sequence for most editing tasks:
 ### Create a new screen from scratch
 1. `figma_bridge_status`
 2. `get_document_info`
-3. `create_frame`
-4. `set_target_frame`
-5. `set_auto_layout`
-6. `create_text`, `create_rectangle`, or component-instance tools
-7. `get_node_info` to verify structure
+3. Check `libraries/<fileKey>/file-library.md` (build it first if this is the first use in the file — see "First use in a file"). Plan the screen against its cataloged components: use `create_instance_from_component_key` / `create_instance_from_set_key` / `create_component_instance` wherever a listed component matches, and only fall back to primitives for elements the library doesn't cover.
+4. `create_frame`
+5. `set_target_frame`
+6. `set_auto_layout`
+7. `create_text`, `create_rectangle`, or component-instance tools for anything not covered by the library
+8. `set_reactions` / `upsert_reaction` for interactive elements, and `set_flow_starting_points` if this screen starts a flow
+9. `set_multiple_annotations` to annotate the screen for dev handoff — components + variants used, interactions, undrawn states, content rules, responsive intent, a11y, and any assumptions (see "Dev Handoff Annotations")
+10. `get_node_info` to verify structure and `get_annotations` to confirm the notes landed
 
 ### Add a design-system component
 1. inspect existing instances with `scan_instances_with_sources`
@@ -603,4 +689,5 @@ When using this skill, always report, briefly (counts and names, not raw payload
 - which tools you called
 - what changed
 - any unresolved ambiguity or risk
+- for new screens: which nodes you annotated and which handoff categories you could not fill in
 - whether you verified the final result
