@@ -752,6 +752,7 @@ const ALLOWED_MCP_TOOLS = new Set([
   "get_parent_chain",
   "insert_child",
   "resize_node",
+  "resize_to_fit",
   "clone_node",
   "clone_node_into_parent",
   "move_node_to_page",
@@ -1729,6 +1730,23 @@ server.registerTool(
   },
   async ({ nodeId, width, height }) => {
     const result = await sendCommand("resize_node", { nodeId, width, height });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "resize_to_fit",
+  {
+    title: "Resize to fit",
+    description: "Fit a layer. Two modes: (1) pass targetNodeId to scale nodeId to fit inside that layer, preserving aspect ratio and centering it (fit: 'contain' letterboxes, 'cover' fills and crops); (2) omit targetNodeId to shrink-wrap nodeId to tightly fit its own children (Figma's 'Resize to Fit').",
+    inputSchema: {
+      nodeId: z.string().describe("The layer to resize or shrink-wrap."),
+      targetNodeId: z.string().optional().describe("Scale nodeId to fit inside this layer's bounds. Omit to shrink-wrap nodeId to its own children."),
+      fit: z.enum(["contain", "cover"]).optional().describe("contain = fit entirely inside the target (default); cover = fill the target, cropping overflow.")
+    }
+  },
+  async ({ nodeId, targetNodeId, fit }) => {
+    const result = await sendCommand("resize_to_fit", { nodeId, targetNodeId, fit });
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );

@@ -1572,6 +1572,87 @@ async function resizeNode(params) {
   return { success: true, nodeId: node.id, width: w, height: h };
 }
 
+async function resizeToFit(params) {
+  const p = params && typeof params === "object" ? params : {};
+  if (!p.nodeId) throw new Error("Missing nodeId parameter");
+  const node = await figma.getNodeByIdAsync(String(p.nodeId));
+  if (!node) throw new Error("Node not found with ID: " + String(p.nodeId));
+  if (!("resize" in node)) throw new Error("Node does not support resize");
+  const targetId = p.targetNodeId ? String(p.targetNodeId) : null;
+  const fitMode = p.fit === "cover" ? "cover" : "contain";
+
+  if (targetId) {
+    const target = await figma.getNodeByIdAsync(targetId);
+    if (!target) throw new Error("Target layer not found with ID: " + targetId);
+    const nw = Number(node.width);
+    const nh = Number(node.height);
+    const tw = Number(target.width);
+    const th = Number(target.height);
+    if (!Number.isFinite(nw) || !Number.isFinite(nh) || nw <= 0 || nh <= 0) {
+      throw new Error("Cannot fit a node with zero or invalid width/height");
+    }
+    if (!Number.isFinite(tw) || !Number.isFinite(th) || tw <= 0 || th <= 0) {
+      throw new Error("Target layer has zero or invalid width/height");
+    }
+    const scale = fitMode === "cover" ? Math.max(tw / nw, th / nh) : Math.min(tw / nw, th / nh);
+    const newW = nw * scale;
+    const newH = nh * scale;
+    node.resize(newW, newH);
+    let centered = false;
+    const targetBox = target.absoluteBoundingBox || null;
+    if (targetBox && "x" in node && "y" in node) {
+      try {
+        if (isAutoLayoutParent(node.parent)) node.layoutPositioning = "ABSOLUTE";
+      } catch (_) {}
+      const abs = node.absoluteTransform;
+      const ax = abs[0][2];
+      const ay = abs[1][2];
+      const nx = targetBox.x + (targetBox.width - newW) / 2;
+      const ny = targetBox.y + (targetBox.height - newH) / 2;
+      node.x = Number(node.x) + (nx - ax);
+      node.y = Number(node.y) + (ny - ay);
+      centered = true;
+    }
+    return { success: true, nodeId: node.id, mode: "fit", targetNodeId: target.id, fit: fitMode, width: newW, height: newH, scale, centered };
+  }
+
+  if (!("children" in node) || !node.children || node.children.length === 0) {
+    throw new Error("Container has no children to fit. Pass targetNodeId to scale into another layer instead.");
+  }
+  const selfBox = node.absoluteBoundingBox;
+  if (!selfBox) throw new Error("Cannot measure the container's bounds");
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const child of node.children) {
+    const cb = child.absoluteBoundingBox;
+    if (!cb) continue;
+    minX = Math.min(minX, cb.x - selfBox.x);
+    minY = Math.min(minY, cb.y - selfBox.y);
+    maxX = Math.max(maxX, cb.x - selfBox.x + cb.width);
+    maxY = Math.max(maxY, cb.y - selfBox.y + cb.height);
+  }
+  if (!Number.isFinite(minX)) throw new Error("No child nodes have measurable bounds");
+  const newW = maxX - minX;
+  const newH = maxY - minY;
+  if (newW <= 0 || newH <= 0) throw new Error("Content bounds are empty");
+  const shiftX = -minX;
+  const shiftY = -minY;
+  let shiftedCount = 0;
+  for (const child of node.children) {
+    if (!("x" in child) || !("y" in child)) continue;
+    if (isAutoLayoutParent(child.parent)) continue;
+    if (shiftX !== 0 || shiftY !== 0) {
+      child.x = Number(child.x) + shiftX;
+      child.y = Number(child.y) + shiftY;
+      shiftedCount += 1;
+    }
+  }
+  node.resize(newW, newH);
+  return { success: true, nodeId: node.id, mode: "shrink", width: newW, height: newH, shiftedCount };
+}
+
 async function reparentNode(params) {
   if (!params || !params.nodeId) throw new Error("Missing nodeId parameter");
   if (!params || !params.newParentId) throw new Error("Missing newParentId parameter");
@@ -1792,7 +1873,7 @@ const UNDO_MAX = 50;
 
 const UNDOABLE_ACTIONS = new Set([
   "rename_node", "set_fill_color", "set_stroke_color", "set_gradient_fill", "set_image_fill",
-  "set_effects", "set_text_style", "move_node", "resize_node", "set_corner_radius",
+  "set_effects", "set_text_style", "move_node", "resize_node", "resize_to_fit", "set_corner_radius",
   "set_text_content", "set_multiple_text_contents", "set_layout_mode", "set_padding",
   "set_axis_align", "set_layout_sizing", "set_item_spacing", "set_auto_layout",
   "set_layout_grids", "set_overflow_direction", "set_fixed_children",
@@ -5465,6 +5546,7 @@ const TARGET_SCOPED_ACTIONS = {
   set_text_style: (p) => [p.nodeId],
   move_node: (p) => [p.nodeId],
   resize_node: (p) => [p.nodeId],
+  resize_to_fit: (p) => [p.nodeId].concat(p.targetNodeId ? [String(p.targetNodeId)] : []),
   set_corner_radius: (p) => [p.nodeId],
   set_text_content: (p) => [p.nodeId],
   set_multiple_text_contents: (p) => ensureArray(p.updates).map((u) => u && u.nodeId).filter(Boolean),
@@ -5586,7 +5668,7 @@ const ALLOWED_ACTIONS = new Set([
   "set_fill_color", "set_stroke_color",
   "set_layout_mode", "set_padding", "set_axis_align", "set_layout_sizing", "set_item_spacing",
   "set_auto_layout", "set_layout_grids", "set_overflow_direction", "set_fixed_children",
-  "move_node", "reparent_node", "get_parent_chain", "insert_child", "resize_node",
+  "move_node", "reparent_node", "get_parent_chain", "insert_child", "resize_node", "resize_to_fit",
   "delete_node", "delete_multiple_nodes",
   "clone_node", "clone_node_into_parent", "move_node_to_page",
   "set_corner_radius",
@@ -5739,6 +5821,7 @@ async function dispatchAction(action, payload) {
     case "get_parent_chain": return await getParentChain(p);
     case "insert_child": return await insertChild(p);
     case "resize_node": return await resizeNode(p);
+    case "resize_to_fit": return await resizeToFit(p);
     case "delete_node": return await deleteNode(p);
     case "delete_multiple_nodes": return await deleteMultipleNodes(p);
     case "clone_node": return await cloneNode(p);

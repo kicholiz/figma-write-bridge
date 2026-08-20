@@ -378,6 +378,7 @@ Pass `verbose: true` to any of the four to get the original array-of-objects (or
 - `reparent_node` (optional `index`) / `insert_child` — move (cut) any existing node into/out of frames, sections, groups, auto-layouts, slots, and pages; `index` controls order inside auto-layout containers
 - `get_parent_chain`
 - `resize_node`
+- `resize_to_fit` — two modes: (1) pass `targetNodeId` to scale the layer to fit inside that layer (aspect-preserving, centered; `fit: "contain"` letterboxes, `fit: "cover"` fills and crops); (2) omit `targetNodeId` to shrink-wrap the container tightly to its own children (Figma's "Resize to Fit")
 - `set_fill_color`
 - `set_stroke_color`
 - `set_corner_radius`
