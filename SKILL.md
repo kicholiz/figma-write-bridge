@@ -337,6 +337,7 @@ Pass `verbose: true` to any of the four to get the original array-of-objects (or
 - `get_local_components`
 - `list_variable_collections` — lists every collection with its modes (id/name). Use this first to discover mode ids/names (few collections — never paged).
 - `list_variables` — list local variables, paged: returns `{ variables, total, offset, limit, pageCount }` (default `limit` 500) — page with `offset` until you reach `total` to enumerate every variable without one huge response. Pass `includeValues: true` to read each variable's value in **every** mode (`valuesByMode` keyed by modeId, `valuesByModeName` keyed by mode name, `defaultValue` from the collection's first mode, plus the mode list). This is how you read theme/dark-mode values. `set_variable_values` / `create_variable` accept `valuesByMode` keyed by mode id, mode name, or mode index to write into any mode.
+- `get_variable` — read ONE variable's per-mode values in detail: lookup by `variableId`, `key`, or `name` (+ `collectionId`/`collectionName` to disambiguate). Returns raw `valuesByMode`/`valuesByModeName` (aliases are `{type:"VARIABLE_ALIAS",id}`) plus `resolvedValuesByMode`/`resolvedValuesByModeName` that follow aliases to concrete values (colors as hex). Prefer this over `list_variables({includeValues:true})` when you need one variable's full themed values.
 - `get_annotations`
 - `get_reactions`
 - `get_changes_since` — pass the `currentSeq` from a previous call as `sinceSeq` to get back only the node ids this bridge has mutated since then, instead of re-reading the whole document to see what changed. Cursor resets when the MCP server restarts.
@@ -411,7 +412,7 @@ Pass `verbose: true` to any of the four to get the original array-of-objects (or
 ### Theme Switching & Variable Modes
 - `set_variable_mode` — theme switch: set a mode on many nodes at once (`modeId` can be an id or exact name; scope via `nodeIds`/`rootNodeId`/whole page)
 - `create_variable_mode` / `rename_variable_mode` / `delete_variable_mode` (delete needs `confirmDelete`)
-- `rename_variable_collection`
+- `rename_variable_collection` / `delete_variable_collection` (delete needs `confirmDelete`)
 
 ### Events (Push from Figma)
 - `subscribe_events` / `unsubscribe_events` — enable/disable push of `selectionchange` / `documentchange`

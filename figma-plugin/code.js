@@ -3792,14 +3792,15 @@ async function listVariables(params) {
         const values = v.valuesByMode || {};
         const col = collectionsById ? collectionsById.get(v.variableCollectionId) : null;
         const modes = col && Array.isArray(col.modes) ? col.modes : [];
+        const modeNameById = {};
+        for (const m of modes) modeNameById[m.modeId] = m.name;
         entry.modes = modes.map((m) => ({ modeId: m.modeId, name: m.name }));
         entry.valuesByMode = {};
         entry.valuesByModeName = {};
-        for (const m of modes) {
-          const val = values[m.modeId];
-          if (val === undefined) continue;
-          entry.valuesByMode[m.modeId] = serializeVariableValue(val);
-          entry.valuesByModeName[m.name] = serializeVariableValue(val);
+        for (const key of collectModeKeys(col, values)) {
+          const name = modeNameById[key] !== undefined ? modeNameById[key] : key;
+          entry.valuesByMode[key] = serializeVariableValue(values[key]);
+          entry.valuesByModeName[name] = serializeVariableValue(values[key]);
         }
         const firstMode = modes.length ? modes[0] : null;
         entry.defaultValue = firstMode && values[firstMode.modeId] !== undefined
@@ -3815,6 +3816,96 @@ async function listVariables(params) {
     offset: paged.offset,
     limit: paged.limit,
     pageCount: paged.pageCount
+  };
+}
+
+function resolveVariableValue(value, modeId, varById, seen) {
+  if (value && typeof value === "object" && value.type === "VARIABLE_ALIAS") {
+    const aliasId = String(value.id);
+    if (seen.has(aliasId)) return { type: "VARIABLE_ALIAS_CYCLE", id: aliasId };
+    const target = varById.get(aliasId);
+    if (!target) return { type: "VARIABLE_ALIAS_UNRESOLVED", id: aliasId };
+    const tv = target.valuesByMode || {};
+    let tvv = tv[modeId];
+    if (tvv === undefined) tvv = Object.values(tv)[0];
+    const nextSeen = new Set(seen);
+    nextSeen.add(aliasId);
+    return resolveVariableValue(tvv, modeId, varById, nextSeen);
+  }
+  if (value && typeof value === "object" && "r" in value && "g" in value && "b" in value) return rgbaToHex01(value);
+  return value;
+}
+
+async function getVariable(params) {
+  const p = params && typeof params === "object" ? params : {};
+  let v = null;
+  if (p.variableId || p.id) {
+    v = await figma.variables.getVariableByIdAsync(String(p.variableId || p.id));
+  } else if (p.key) {
+    const key = String(p.key);
+    const vars = await figma.variables.getLocalVariablesAsync();
+    v = vars.find((x) => x.key === key) || null;
+  } else if (p.name || p.variableName) {
+    const name = String(p.name || p.variableName);
+    const vars = await figma.variables.getLocalVariablesAsync();
+    let matches = vars.filter((x) => x.name === name);
+    if (p.collectionId || p.collectionName) {
+      const cols = await figma.variables.getLocalVariableCollectionsAsync();
+      const col = cols.find(
+        (c) => c.id === String(p.collectionId || "") || c.name === String(p.collectionName || "")
+      );
+      if (col) matches = matches.filter((x) => x.variableCollectionId === col.id);
+      else throw new Error("Variable collection not found: " + String(p.collectionId || p.collectionName));
+    }
+    if (matches.length === 0) {
+      matches = vars.filter((x) => x.name.toLowerCase().includes(name.toLowerCase()));
+      if (matches.length !== 1) {
+        throw new Error("Variable not found by name: " + name + (matches.length > 1 ? " (matches more than one; pass variableId, or add collectionId/collectionName)" : ""));
+      }
+      v = matches[0];
+    } else if (matches.length > 1) {
+      throw new Error("Variable name matches more than one variable; pass variableId or add collectionId/collectionName");
+    } else {
+      v = matches[0];
+    }
+  }
+  if (!v) throw new Error("Variable not found. Pass variableId, key, or name.");
+  const collection = await figma.variables.getVariableCollectionByIdAsync(v.variableCollectionId).catch(() => null);
+  const modes = collection && Array.isArray(collection.modes) ? collection.modes : [];
+  const values = v.valuesByMode || {};
+  let varById = null;
+  try {
+    const allVars = await figma.variables.getLocalVariablesAsync();
+    varById = new Map(allVars.map((x) => [x.id, x]));
+  } catch (_err) {}
+  const valuesByMode = {};
+  const valuesByModeName = {};
+  const resolvedValuesByMode = {};
+  const resolvedValuesByModeName = {};
+  const modeNameById = {};
+  for (const m of modes) modeNameById[m.modeId] = m.name;
+  for (const key of collectModeKeys(collection, values)) {
+    const raw = values[key];
+    const name = modeNameById[key] !== undefined ? modeNameById[key] : key;
+    valuesByMode[key] = serializeVariableValue(raw);
+    valuesByModeName[name] = serializeVariableValue(raw);
+    const resolved = varById ? resolveVariableValue(raw, key, varById, new Set()) : serializeVariableValue(raw);
+    resolvedValuesByMode[key] = resolved;
+    resolvedValuesByModeName[name] = resolved;
+  }
+  return {
+    id: v.id,
+    name: v.name,
+    key: v.key,
+    resolvedType: v.resolvedType,
+    scopes: v.scopes,
+    variableCollectionId: v.variableCollectionId,
+    collection: collection ? { id: collection.id, name: collection.name } : null,
+    modes: modes.map((m) => ({ modeId: m.modeId, name: m.name })),
+    valuesByMode,
+    valuesByModeName,
+    resolvedValuesByMode,
+    resolvedValuesByModeName
   };
 }
 
@@ -4964,6 +5055,17 @@ async function renameVariableCollection(params) {
   return { success: true, collectionId: collection.id, name: collection.name };
 }
 
+async function deleteVariableCollection(params) {
+  const collectionId = params && params.collectionId ? String(params.collectionId) : "";
+  if (!collectionId) throw new Error("Missing collectionId");
+  if (!params.confirmDelete) throw new Error("confirmDelete must be true");
+  const collection = await figma.variables.getVariableCollectionByIdAsync(collectionId);
+  if (!collection) throw new Error("Variable collection not found: " + collectionId);
+  if (typeof collection.remove !== "function") throw new Error("VariableCollection.remove() is not available in this Figma environment");
+  collection.remove();
+  return { success: true, collectionId };
+}
+
 async function subscribeEvents(params) {
   const events = ensureArray(params && params.events).map((e) => String(e));
   for (const e of events) activeEventSubscriptions.add(e);
@@ -5231,6 +5333,22 @@ function rgbaToHex01(color) {
   return rgbaToHex(color);
 }
 
+function toTokenValue(w3cType, raw) {
+  if (raw === undefined || raw === null) return null;
+  if (w3cType === "color" && typeof raw === "object") return rgbaToHex01(raw);
+  return raw;
+}
+
+function collectModeKeys(col, values) {
+  const modes = col && Array.isArray(col.modes) ? col.modes : [];
+  const present = Object.keys(values || {}).filter((k) => values[k] !== undefined);
+  const modeIdSet = new Set(modes.map((m) => m.modeId));
+  // Union of the collection's declared modes and every mode key the variable
+  // actually has a value for, so no per-mode value is ever dropped even if the
+  // collection's modes list doesn't line up 1:1 with valuesByMode.
+  return Array.from(new Set([].concat(modeIdSet.size ? Array.from(modeIdSet) : [], present)));
+}
+
 async function exportTokens(params) {
   const p = params && typeof params === "object" ? params : {};
   const includeModes = p.includeModes !== false;
@@ -5254,8 +5372,13 @@ async function exportTokens(params) {
   const tokens = {};
   const tokensByMode = {};
   const flat = [];
+  const collectionsInfo = [];
 
   for (const col of collections) {
+    const modes = col && Array.isArray(col.modes) ? col.modes : [];
+    const modeNameById = {};
+    for (const m of modes) modeNameById[m.modeId] = m.name;
+    collectionsInfo.push({ id: col.id, name: col.name, modes: modes.map((m) => ({ modeId: m.modeId, name: m.name })) });
     for (const varId of col.variableIds || []) {
       const v = varById.get(varId);
       if (!v) continue;
@@ -5263,34 +5386,36 @@ async function exportTokens(params) {
       const w3cType = mapVariableTypeToW3C(v.resolvedType);
       const val = v.valuesByMode || {};
       let value = null;
-      if (col.modes.length) {
-        const firstModeId = col.modes[0].modeId;
+      if (modes.length) {
+        const firstModeId = modes[0].modeId;
         value = val[firstModeId] !== undefined ? val[firstModeId] : Object.values(val)[0];
       }
-      if (value === undefined || value === null) value = null;
-      const tokenValue = w3cType === "color" && value && typeof value === "object" ? rgbaToHex01(value) : value;
+      const tokenValue = toTokenValue(w3cType, value);
       setTokenPath(tokens, path, tokenValue, w3cType);
-      flat.push({ name: String(v.name), collection: col.name, type: w3cType, value: tokenValue, mode: col.modes.length ? col.modes[0].name : null });
+      flat.push({ name: String(v.name), collection: col.name, type: w3cType, value: tokenValue, mode: modes.length ? modes[0].name : null });
       if (includeModes) {
-        for (const mode of col.modes) {
-          const modeVal = val[mode.modeId];
-          if (modeVal === undefined) continue;
-          const key = col.name + "/" + mode.name;
-          if (!tokensByMode[key]) tokensByMode[key] = {};
-          const mv = w3cType === "color" && modeVal && typeof modeVal === "object" ? rgbaToHex01(modeVal) : modeVal;
-          setTokenPath(tokensByMode[key], path, mv, w3cType);
-          flat.push({ name: String(v.name), collection: col.name, type: w3cType, value: mv, mode: mode.name });
+        for (const key of collectModeKeys(col, val)) {
+          const modeName = modeNameById[key] !== undefined ? modeNameById[key] : key;
+          const gkey = col.name + "/" + modeName;
+          if (!tokensByMode[gkey]) tokensByMode[gkey] = {};
+          const mv = toTokenValue(w3cType, val[key]);
+          setTokenPath(tokensByMode[gkey], path, mv, w3cType);
+          flat.push({ name: String(v.name), collection: col.name, type: w3cType, value: mv, mode: modeName });
         }
       }
     }
   }
 
+  const modeKeys = Object.keys(tokensByMode);
   return {
     success: true,
     collectionCount: collections.length,
     variableCount: variables.length,
+    collections: collectionsInfo,
     tokens,
     tokensByMode: includeModes ? tokensByMode : undefined,
+    modeCount: modeKeys.length,
+    modes: modeKeys,
     variables: flat
   };
 }
@@ -5706,7 +5831,7 @@ const TARGET_EXEMPT_ACTIONS = new Set([
   "create_paint_style", "create_text_style", "create_effect_style", "create_grid_style",
   "create_variable_collection", "create_variable", "set_variable_values", "rename_variable", "delete_variable",
   "import_variable_by_key", "import_style_by_key", "import_component_by_key", "import_component_set_by_key",
-  "create_variable_mode", "rename_variable_mode", "delete_variable_mode", "rename_variable_collection",
+"create_variable_mode", "rename_variable_mode", "delete_variable_mode", "rename_variable_collection", "delete_variable_collection",
   "create_instance_from_component_key", "create_instance_from_component_set_key", "create_instance_from_instance",
   "create_component_slot", "edit_component_slot", "delete_component_slot",
   "add_component_property", "edit_component_property", "delete_component_property", "bind_component_property",
@@ -5756,7 +5881,7 @@ const ALLOWED_ACTIONS = new Set([
   "get_overlay_settings", "set_overlay_settings",
   "get_prototype_settings", "set_prototype_start_node", "set_flow_starting_points",
   "get_instance_slots", "append_to_slot",
-  "list_variable_collections", "list_variables",
+"list_variable_collections", "list_variables", "get_variable",
   "create_variable_collection", "create_variable", "set_variable_values",
   "rename_variable", "delete_variable",
   "import_variable_by_key",
@@ -5941,6 +6066,7 @@ async function dispatchAction(action, payload) {
     case "append_to_slot": return await appendToSlot(p);
     case "list_variable_collections": return await listVariableCollections(p);
     case "list_variables": return await listVariables(p);
+    case "get_variable": return await getVariable(p);
     case "create_variable_collection": return await createVariableCollection(p);
     case "create_variable": return await createVariable(p);
     case "set_variable_values": return await setVariableValues(p);
@@ -6004,6 +6130,7 @@ async function dispatchAction(action, payload) {
     case "rename_variable_mode": return await renameVariableMode(p);
     case "delete_variable_mode": return await deleteVariableMode(p);
     case "rename_variable_collection": return await renameVariableCollection(p);
+    case "delete_variable_collection": return await deleteVariableCollection(p);
     case "subscribe_events": return await subscribeEvents(p);
     case "unsubscribe_events": return await unsubscribeEvents(p);
     case "sync_target_frames": return await syncTargetFrames(p);

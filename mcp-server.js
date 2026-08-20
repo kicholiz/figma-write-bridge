@@ -778,6 +778,7 @@ const ALLOWED_MCP_TOOLS = new Set([
   "set_fixed_children",
   "list_variable_collections",
   "list_variables",
+  "get_variable",
   "create_variable_collection",
   "create_variable",
   "set_variable_values",
@@ -827,6 +828,7 @@ const ALLOWED_MCP_TOOLS = new Set([
   "rename_variable_mode",
   "delete_variable_mode",
   "rename_variable_collection",
+  "delete_variable_collection",
   "subscribe_events",
   "unsubscribe_events",
   "get_events",
@@ -3169,6 +3171,25 @@ server.registerTool(
 );
 
 server.registerTool(
+  "get_variable",
+  {
+    title: "Get variable",
+    description: "Read one variable's values in EVERY mode. Find it by variableId, by publish key, or by name (if the name is not unique, pass collectionId/collectionName to disambiguate). Returns valuesByMode / valuesByModeName (raw values, aliases as {type:\"VARIABLE_ALIAS\",id}) plus resolvedValuesByMode / resolvedValuesByModeName that follow aliases to a concrete value (colors as hex) with cycle/unresolved markers if needed.",
+    inputSchema: {
+      variableId: z.string().optional().describe("The variable's id (from list_variables)."),
+      key: z.string().optional().describe("The variable's publish key."),
+      name: z.string().optional().describe("The variable's name (exact, or unique partial)."),
+      collectionId: z.string().optional().describe("Disambiguate an ambiguous name by collection id."),
+      collectionName: z.string().optional().describe("Disambiguate an ambiguous name by collection name.")
+    }
+  },
+  async ({ variableId, key, name, collectionId, collectionName }) => {
+    const result = await sendCommand("get_variable", { variableId, key, name, collectionId, collectionName });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
   "create_variable_collection",
   {
     title: "Create variable collection",
@@ -3687,7 +3708,7 @@ server.registerTool(
   "export_tokens",
   {
     title: "Export design tokens",
-    description: "Export local Figma variables as a W3C-style Design Tokens object (nested by collection/variable name), plus a flat variables list. Colors are emitted as hex. Set includeModes=false to skip per-mode views. Pass collections (array of collection names or ids) to export only those collections — keeps the response small on large files.",
+    description: "Export local Figma variables as a W3C-style Design Tokens object (nested by collection/variable name), plus a flat variables list. Colors are emitted as hex. With includeModes (default true) every mode's values are returned under tokensByMode like \"Color/Dark\"; the response also includes `collections` (each with its full `modes` list), `modes` (all mode keys emitted) and `modeCount` so you can verify all modes (not just the first) came through. Set includeModes=false to skip per-mode views. Pass collections (array of collection names or ids) to export only those collections — keeps the response small on large files.",
     inputSchema: {
       includeModes: z.boolean().optional(),
       collections: z.array(z.string()).optional().describe("Export only these collections (by name or id). Omit to export all.")
@@ -4235,6 +4256,22 @@ server.registerTool(
   },
   async ({ collectionId, name }) => {
     const result = await sendCommand("rename_variable_collection", { collectionId, name });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "delete_variable_collection",
+  {
+    title: "Delete variable collection",
+    description: "Delete an entire variable collection (and all its variables/modes). Requires confirmDelete=true.",
+    inputSchema: {
+      collectionId: z.string(),
+      confirmDelete: z.boolean()
+    }
+  },
+  async ({ collectionId, confirmDelete }) => {
+    const result = await sendCommand("delete_variable_collection", { collectionId, confirmDelete });
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
