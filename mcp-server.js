@@ -851,11 +851,61 @@ const ALLOWED_MCP_TOOLS = new Set([
 
 const MAX_RESULT_BYTES = Number(process.env.FIGMA_BRIDGE_MAX_RESULT_BYTES || "50000");
 
+// Catalog-enumeration tools must arrive whole: the workflow enumerates every
+// variable/style/component (and dumps tokens), so capping them would silently
+// drop part of the catalog and hand the agent an incomplete file overview.
+const NO_TRUNCATE_TOOLS = new Set([
+  "list_variables",
+  "list_variable_collections",
+  "export_tokens",
+  "get_styles",
+  "get_local_components"
+]);
+
+function tryParseJson(text) {
+  try { return JSON.parse(text); } catch (_err) { return undefined; }
+}
+
+function clampJsonToBudget(node, budget) {
+  const size = (n) => Buffer.byteLength(JSON.stringify(n), "utf8");
+  if (size(node) <= budget) return { node, truncated: false };
+  if (Array.isArray(node)) {
+    let arr = node;
+    while (arr.length > 1 && size(arr) > budget) {
+      arr = arr.slice(0, Math.max(1, Math.floor(arr.length / 2)));
+    }
+    return { node: arr, truncated: true };
+  }
+  if (node && typeof node === "object") {
+    const arrayKeys = Object.keys(node).filter((k) => Array.isArray(node[k]) && node[k].length > 0);
+    if (!arrayKeys.length) return { node, truncated: false };
+    const clone = { ...node };
+    let truncated = false;
+    for (const k of arrayKeys) {
+      const res = clampJsonToBudget(clone[k], Math.max(1, Math.floor(budget / arrayKeys.length)));
+      clone[k] = res.node;
+      truncated = truncated || res.truncated;
+    }
+    return { node: clone, truncated };
+  }
+  return { node, truncated: false };
+}
+
 function truncateResultText(text) {
   if (Buffer.byteLength(text, "utf8") <= MAX_RESULT_BYTES) return text;
+  const parsed = tryParseJson(text);
+  if (parsed !== undefined) {
+    const clamped = clampJsonToBudget(parsed, MAX_RESULT_BYTES);
+    const out = clamped.node;
+    if (out && typeof out === "object" && !Array.isArray(out)) {
+      out.truncated = true;
+      out.truncatedNote = `Result exceeded ${MAX_RESULT_BYTES} bytes; largest arrays trimmed. Narrow the query or raise FIGMA_BRIDGE_MAX_RESULT_BYTES.`;
+    }
+    return JSON.stringify(out);
+  }
   let slice = String(text).slice(0, MAX_RESULT_BYTES);
   while (Buffer.byteLength(slice, "utf8") > MAX_RESULT_BYTES) slice = slice.slice(0, slice.length - 100);
-  return slice + `\n\n[TRUNCATED: result exceeded ${MAX_RESULT_BYTES} bytes; pass tighter options (e.g. maxDepth, chunkSize, maxChars, includeProperties: false) to narrow the response]`;
+  return slice + `\n\n[TRUNCATED: result exceeded ${MAX_RESULT_BYTES} bytes; raise FIGMA_BRIDGE_MAX_RESULT_BYTES or narrow the query]`;
 }
 
 function toColumnar(items) {
@@ -911,6 +961,7 @@ function slimToolListPayload(message) {
   const originalRegisterTool = server.registerTool.bind(server);
   server.registerTool = (name, meta, handler) => {
     if (!ALLOWED_MCP_TOOLS.has(String(name))) return;
+    const skipTruncate = NO_TRUNCATE_TOOLS.has(String(name));
     return originalRegisterTool(name, meta, async (...args) => {
       const result = await handler(...args);
       if (result && Array.isArray(result.content)) {
@@ -918,7 +969,7 @@ function slimToolListPayload(message) {
           ...result,
           content: result.content.map((c) => {
             if (c && c.type === "text" && typeof c.text === "string") {
-              return { ...c, text: truncateResultText(c.text) };
+              return { ...c, text: skipTruncate ? c.text : truncateResultText(c.text) };
             }
             return c;
           })
@@ -2127,10 +2178,14 @@ server.registerTool(
   "get_styles",
   {
     title: "Get styles",
-    description: "Get information about local styles."
+    description: "Get information about local styles. Paged per style type: pass limit/offset to bound each response (default 500); `totalPaintStyles`/`totalTextStyles`/`totalEffectStyles`/`totalGridStyles` report the full counts.",
+    inputSchema: {
+      limit: z.number().optional().describe("Max styles of each type (default 500)."),
+      offset: z.number().optional().describe("Skip this many (default 0).")
+    }
   },
-  async () => {
-    const result = await sendCommand("get_styles", {});
+  async ({ limit, offset }) => {
+    const result = await sendCommand("get_styles", { limit, offset });
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -2324,16 +2379,18 @@ server.registerTool(
   "get_local_components",
   {
     title: "Get local components",
-    description: "Get information about local components across all pages: id, name, type, description, publish key, and a property count. Returns a columnar table: fields lists the column names and rows holds one array per component. Pass includeProperties: true to also get simplified component property definitions (for building library catalogs).",
+    description: "Get information about local components across all pages: id, name, type, description, publish key, and a property count, returned as { components, total, offset, limit, pageCount } so you can page every component (default limit 500). Pass includeProperties: true to also get simplified component property definitions (for building library catalogs). Pass verbose to skip compacting; the columnar format is used otherwise.",
     inputSchema: {
       includeComponentSets: z.boolean().optional(),
       includeProperties: z.boolean().optional().describe("Include full componentPropertyDefinitions. Default false (returns propertyCount only) to keep output small."),
+      limit: z.number().optional().describe("Max components per page (default 500)."),
+      offset: z.number().optional().describe("Skip this many (default 0)."),
       verbose: z.boolean().optional().describe("Return an array of objects instead of the columnar fields/rows table.")
     }
   },
-  async ({ includeComponentSets, includeProperties, verbose }) => {
-    const result = await sendCommand("get_local_components", { includeComponentSets, includeProperties });
-    const columnar = verbose ? null : toColumnar(result);
+  async ({ includeComponentSets, includeProperties, limit, offset, verbose }) => {
+    const result = await sendCommand("get_local_components", { includeComponentSets, includeProperties, limit, offset });
+    const columnar = verbose ? null : toColumnar(result.components || result);
     return { content: [{ type: "text", text: JSON.stringify(columnar || result) }] };
   }
 );
@@ -3096,15 +3153,17 @@ server.registerTool(
   "list_variables",
   {
     title: "List variables",
-    description: "List local variables in the current file (optionally filtered by resolvedType). Pass includeScopes: true to also return each variable's scopes, or includeValues: true to also return each variable's value in EVERY mode (valuesByMode by modeId, valuesByModeName by mode name, defaultValue from the collection's first mode, and the mode list) — use this to read theme/dark-mode values, not just the default mode.",
+    description: "List local variables in the current file (optionally filtered by resolvedType). Pass includeScopes: true to also return each variable's scopes, or includeValues: true to also return each variable's value in EVERY mode (valuesByMode by modeId, valuesByModeName by mode name, defaultValue from the collection's first mode, and the mode list) — use this to read theme/dark-mode values, not just the default mode. Results are paged: default limit 500 per call with `total`/`offset`/`pageCount` so you can page through every variable instead of reading them all at once.",
     inputSchema: {
       resolvedType: z.string().optional(),
       includeScopes: z.boolean().optional().describe("Include per-variable scopes arrays. Default false to keep output small."),
-      includeValues: z.boolean().optional().describe("Include per-variable values for every mode (valuesByMode, valuesByModeName, defaultValue, modes). Default false.")
+      includeValues: z.boolean().optional().describe("Include per-variable values for every mode (valuesByMode, valuesByModeName, defaultValue, modes). Default false."),
+      limit: z.number().optional().describe("Max entries per page (default 500)."),
+      offset: z.number().optional().describe("Skip this many entries (default 0). Page with offset until you reach `total`.")
     }
   },
-  async ({ resolvedType, includeScopes, includeValues }) => {
-    const result = await sendCommand("list_variables", { resolvedType, includeScopes, includeValues });
+  async ({ resolvedType, includeScopes, includeValues, limit, offset }) => {
+    const result = await sendCommand("list_variables", { resolvedType, includeScopes, includeValues, limit, offset });
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -3628,13 +3687,14 @@ server.registerTool(
   "export_tokens",
   {
     title: "Export design tokens",
-    description: "Export all local Figma variables as a W3C-style Design Tokens object (nested by collection/variable name), plus a flat variables list. Colors are emitted as hex. Set includeModes=false to skip per-mode views.",
+    description: "Export local Figma variables as a W3C-style Design Tokens object (nested by collection/variable name), plus a flat variables list. Colors are emitted as hex. Set includeModes=false to skip per-mode views. Pass collections (array of collection names or ids) to export only those collections — keeps the response small on large files.",
     inputSchema: {
-      includeModes: z.boolean().optional()
+      includeModes: z.boolean().optional(),
+      collections: z.array(z.string()).optional().describe("Export only these collections (by name or id). Omit to export all.")
     }
   },
-  async ({ includeModes }) => {
-    const result = await sendCommand("export_tokens", { includeModes });
+  async ({ includeModes, collections }) => {
+    const result = await sendCommand("export_tokens", { includeModes, collections });
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );

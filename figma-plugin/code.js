@@ -2335,16 +2335,26 @@ async function scanNodesByTypes(params) {
 // Styles
 // ---------------------------------------------------------------------------
 
-async function getStyles() {
-  const paintStyles = await getLocalPaintStyles();
-  const textStyles = await getLocalTextStyles();
-  const effectStyles = await getLocalEffectStyles();
-  const gridStyles = await getLocalGridStyles();
+async function getStyles(params) {
+  const paintStyles = (await getLocalPaintStyles()).map((s) => ({ id: s.id, name: s.name }));
+  const textStyles = (await getLocalTextStyles()).map((s) => ({ id: s.id, name: s.name }));
+  const effectStyles = (await getLocalEffectStyles()).map((s) => ({ id: s.id, name: s.name }));
+  const gridStyles = (await getLocalGridStyles()).map((s) => ({ id: s.id, name: s.name }));
+  const limitRaw = Number(params && params.limit !== undefined && params.limit !== null ? params.limit : DEFAULT_PAGE_SIZE);
+  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.floor(limitRaw)) : DEFAULT_PAGE_SIZE;
+  const offsetRaw = Number(params && params.offset !== undefined && params.offset !== null ? params.offset : 0);
+  const offset = Number.isFinite(offsetRaw) ? Math.max(0, Math.floor(offsetRaw)) : 0;
   return {
-    paintStyles: paintStyles.map((s) => ({ id: s.id, name: s.name })),
-    textStyles: textStyles.map((s) => ({ id: s.id, name: s.name })),
-    effectStyles: effectStyles.map((s) => ({ id: s.id, name: s.name })),
-    gridStyles: gridStyles.map((s) => ({ id: s.id, name: s.name }))
+    paintStyles: paintStyles.slice(offset, offset + limit),
+    textStyles: textStyles.slice(offset, offset + limit),
+    effectStyles: effectStyles.slice(offset, offset + limit),
+    gridStyles: gridStyles.slice(offset, offset + limit),
+    totalPaintStyles: paintStyles.length,
+    totalTextStyles: textStyles.length,
+    totalEffectStyles: effectStyles.length,
+    totalGridStyles: gridStyles.length,
+    offset,
+    limit
   };
 }
 
@@ -2612,7 +2622,7 @@ async function getLocalComponents(params) {
     if (includeComponentSets && n.type === "COMPONENT_SET") return true;
     return false;
   });
-  return nodes.map((n) => {
+  const entries = nodes.map((n) => {
     let defs = {};
     if (includeProperties) {
       try {
@@ -2639,6 +2649,8 @@ async function getLocalComponents(params) {
     }
     return entry;
   });
+  const paged = applyPage(entries, params, DEFAULT_PAGE_SIZE);
+  return { components: paged.page, total: paged.total, offset: paged.offset, limit: paged.limit, pageCount: paged.pageCount };
 }
 
 async function createComponentNode(params) {
@@ -3725,6 +3737,25 @@ function serializeVariableValue(value) {
   return value;
 }
 
+// Bounded default page size for catalog listings so a single tool result stays
+// token-cheap even on huge files; callers page through with offset/limit.
+const DEFAULT_PAGE_SIZE = 500;
+
+function applyPage(items, params, defaultLimit) {
+  const limitRaw = Number(params && params.limit !== undefined && params.limit !== null ? params.limit : defaultLimit);
+  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.floor(limitRaw)) : defaultLimit;
+  const offsetRaw = Number(params && params.offset !== undefined && params.offset !== null ? params.offset : 0);
+  const offset = Number.isFinite(offsetRaw) ? Math.max(0, Math.floor(offsetRaw)) : 0;
+  const total = Array.isArray(items) ? items.length : 0;
+  return {
+    page: Array.isArray(items) ? items.slice(offset, offset + limit) : [],
+    total,
+    offset,
+    limit,
+    pageCount: total === 0 ? 0 : Math.ceil(total / limit)
+  };
+}
+
 async function listVariables(params) {
   const resolvedType = params && params.resolvedType ? String(params.resolvedType) : undefined;
   const includeScopes = params && params.includeScopes !== undefined ? Boolean(params.includeScopes) : false;
@@ -3747,8 +3778,7 @@ async function listVariables(params) {
       collectionsById = new Map(cols.map((c) => [c.id, c]));
     } catch (_err) {}
   }
-  return {
-    variables: vars.map((v) => {
+  const entries = vars.map((v) => {
       const entry = {
         id: v.id,
         name: v.name,
@@ -3777,7 +3807,14 @@ async function listVariables(params) {
           : null;
       }
       return entry;
-    })
+    });
+  const paged = applyPage(entries, params, DEFAULT_PAGE_SIZE);
+  return {
+    variables: paged.page,
+    total: paged.total,
+    offset: paged.offset,
+    limit: paged.limit,
+    pageCount: paged.pageCount
   };
 }
 
@@ -5197,7 +5234,11 @@ function rgbaToHex01(color) {
 async function exportTokens(params) {
   const p = params && typeof params === "object" ? params : {};
   const includeModes = p.includeModes !== false;
-  const collections = await figma.variables.getLocalVariableCollectionsAsync();
+  let collections = await figma.variables.getLocalVariableCollectionsAsync();
+  const requestedCollections = ensureArray(p.collections).map((x) => String(x)).filter(Boolean);
+  if (requestedCollections.length) {
+    collections = collections.filter((col) => requestedCollections.some((key) => col.id === key || col.name === key));
+  }
   let variables;
   try {
     variables = await figma.variables.getLocalVariablesAsync();
@@ -5817,7 +5858,7 @@ async function dispatchAction(action, payload) {
     case "scan_instances_with_sources": return await scanInstancesWithSources(p);
     case "set_focus": return await setFocus(p);
     case "set_selections": return await setSelections(p);
-    case "get_styles": return await getStyles();
+    case "get_styles": return await getStyles(p);
     case "get_local_components": return await getLocalComponents(p);
     case "create_component": return await createComponentNode(p);
     case "create_component_from_node": return await createComponentFromNodeAction(p);

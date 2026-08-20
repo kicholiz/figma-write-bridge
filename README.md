@@ -23,11 +23,11 @@ This repo contains:
 - **Text styling** — apply existing text styles or set font/font-size/line-height/letter-spacing/case/alignment directly, with variable binding. Generate a whole type scale from a base size + ratio with `create_typography_scale`.
 - **Design tokens** — export local variables as a W3C-style Design Tokens JSON (`export_tokens`) and import a tokens JSON into variables + paint styles (`import_tokens`).
 - **Style guides & palettes** — extract a usage style guide (`get_style_guide`: colors, fonts, sizes, spacing), list fonts used (`get_font_list`), and generate tonal color palettes with swatches/styles/variables (`generate_palette`).
-- **Components** — create/import components and instances (imports accept a `name` to rename the main node), batch-convert frames into a variant component set (`extract_component_set`), and move/copy a local component to another open file's channel with `move_component_to_file`.
+- **Components** — create/import components and instances (imports accept a `name` to rename the main node), batch-convert frames into a variant component set (`extract_component_set`), and move/copy a local component to another open file's channel with `move_component_to_file`. `get_local_components` is paged (`limit`/`offset` + `total`).
 - **Undo/redo** — snapshot-based `undo` / `redo` for the most recent mutating actions, shared between the agent's tools and Undo/Redo buttons in the plugin UI itself (best-effort; cannot restore deleted nodes or structural changes).
 - **Pages** — create, rename, duplicate (auto-names like `Name 2` or takes a `name`), reorder, switch, and delete pages; `create_page` / `duplicate_page` accept `activate: true` to switch to the new page.
 - **Bulk & template work** — `bulk_rename`, `bulk_update`, `replace_all_instances`, and page duplication.
-- **Variables & themes** — create/rename/delete variable modes and collections, read every variable's value in every mode (`list_variables` with `includeValues: true` returns `valuesByMode`/`valuesByModeName`/`defaultValue`), write values into any mode (`set_variable_values(valuesByMode)`), and theme-switch whole frames/pages with `set_variable_mode`.
+- **Variables & themes** — create/rename/delete variable modes and collections, read every variable's value in every mode (`list_variables` with `includeValues: true` returns `valuesByMode`/`valuesByModeName`/`defaultValue`), write values into any mode (`set_variable_values(valuesByMode)`), and theme-switch whole frames/pages with `set_variable_mode`. Catalog listings are paged to keep responses token-cheap: `list_variables` / `get_local_components` / `get_styles` take `limit`/`offset` (default 500) and return `total` so you can page through large catalogs.
 - **Live push events** — subscribe to `selectionchange` / `documentchange` so the agent can react to your selection or canvas without polling.
 - **Channel dashboard** — `list_channels` shows which file each connected channel belongs to.
 - **REST API extras** — file JSON, image downloads, bulk frame exports, file comments, and component search (with `FIGMA_TOKEN`).
@@ -193,7 +193,7 @@ Environment variables supported by the server:
 - `FIGMA_BRIDGE_PORT` (default `8787`)
 - `FIGMA_BRIDGE_CHANNEL` (default `default`; pin this to run multiple MCP servers, each on its own port)
 - `FIGMA_BRIDGE_TIMEOUT_MS` (default `180000`)
-- `FIGMA_BRIDGE_MAX_RESULT_BYTES` (default `50000`) — cap on a single tool result before it is truncated, to stop one big read from filling the agent's context. Raise it if you genuinely need a large single read.
+- `FIGMA_BRIDGE_MAX_RESULT_BYTES` (default `50000`) — cap on a single tool result before it is truncated, to stop one big read from filling the agent's context. Raise it if you genuinely need a large single read. Catalog tools (`list_variables`, `list_variable_collections`, `export_tokens`, `get_styles`, `get_local_components`) are **exempt** from the cap so the agent always receives the full catalog for that call — they are instead **paged** (`limit`/`offset`, default 500, plus `total`) so a single tool call stays token-cheap while every entry stays reachable. Truncation is JSON-safe: for JSON results it trims the largest arrays and sets a `truncated: true` flag instead of corrupting the payload.
 - `FIGMA_TOKEN` (required for the REST API tools: `get_figma_data`, `download_figma_images`, comments, `export_frames_to_disk`, `search_components`)
 
 Example (PowerShell):

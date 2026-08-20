@@ -131,9 +131,9 @@ If it does **not** exist yet, this is the first time the plugin is being used ag
 
 1. Confirm the bridge and file via `figma_bridge_status` and `get_document_info`.
 2. If you don't already know the Figma file's URL (needed to build component links), ask the user for it once. Extract the file key from the URL (the segment after `/design/` or `/file/`).
-3. Call `get_local_components` to enumerate every component and component set in the file (this also returns `description`, `key`, and simplified `componentPropertyDefinitions` — no extra per-component calls needed).
+3. Call `get_local_components` to enumerate every component and component set in the file (this also returns `description`, `key`, and simplified `componentPropertyDefinitions` — no extra per-component calls needed). It is paged: returns `{ components, total, offset, limit, pageCount }` — page with `offset`/`limit` (default 500) until you've collected `total` entries.
 4. For each component/component set, record: name, type (`COMPONENT` or `COMPONENT_SET`), node id, description if available, its property names/types (from `componentPropertyDefinitions`, omit if none), and a direct Figma URL built as `https://www.figma.com/design/<fileKey>/<file-name>?node-id=<nodeId with ":" replaced by "-">`.
-5. Call `list_variable_collections` and `list_variables` to enumerate every variable.
+5. Call `list_variable_collections` (few, never paged) and `list_variables` to enumerate every variable — page `list_variables` with `offset`/`limit` (default 500). Omit `includeValues` for the catalog (metadata only); use `list_variables({includeValues:true})` or targeted reads when you actually need values.
 6. Write `libraries/<fileKey>/file-library.md` with two sections:
 
    ```markdown
@@ -335,8 +335,8 @@ Pass `verbose: true` to any of the four to get the original array-of-objects (or
 - `get_instance_source`
 - `get_styles`
 - `get_local_components`
-- `list_variable_collections` — lists every collection with its modes (id/name). Use this first to discover mode ids/names.
-- `list_variables` — list local variables. Pass `includeValues: true` to read each variable's value in **every** mode (`valuesByMode` keyed by modeId, `valuesByModeName` keyed by mode name, `defaultValue` from the collection's first mode, plus the mode list). This is how you read theme/dark-mode values, not just the default mode. `set_variable_values` / `create_variable` accept `valuesByMode` keyed by mode id, mode name, or mode index to write into any mode.
+- `list_variable_collections` — lists every collection with its modes (id/name). Use this first to discover mode ids/names (few collections — never paged).
+- `list_variables` — list local variables, paged: returns `{ variables, total, offset, limit, pageCount }` (default `limit` 500) — page with `offset` until you reach `total` to enumerate every variable without one huge response. Pass `includeValues: true` to read each variable's value in **every** mode (`valuesByMode` keyed by modeId, `valuesByModeName` keyed by mode name, `defaultValue` from the collection's first mode, plus the mode list). This is how you read theme/dark-mode values. `set_variable_values` / `create_variable` accept `valuesByMode` keyed by mode id, mode name, or mode index to write into any mode.
 - `get_annotations`
 - `get_reactions`
 - `get_changes_since` — pass the `currentSeq` from a previous call as `sinceSeq` to get back only the node ids this bridge has mutated since then, instead of re-reading the whole document to see what changed. Cursor resets when the MCP server restarts.
