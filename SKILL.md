@@ -133,7 +133,7 @@ If it does **not** exist yet, this is the first time the plugin is being used ag
 2. If you don't already know the Figma file's URL (needed to build component links), ask the user for it once. Extract the file key from the URL (the segment after `/design/` or `/file/`).
 3. Call `get_local_components` to enumerate every component and component set in the file (this also returns `description`, `key`, and simplified `componentPropertyDefinitions` — no extra per-component calls needed). It is paged: returns `{ components, total, offset, limit, pageCount }` — page with `offset`/`limit` (default 500) until you've collected `total` entries.
 4. For each component/component set, record: name, type (`COMPONENT` or `COMPONENT_SET`), node id, description if available, its property names/types (from `componentPropertyDefinitions`, omit if none), and a direct Figma URL built as `https://www.figma.com/design/<fileKey>/<file-name>?node-id=<nodeId with ":" replaced by "-">`.
-5. Call `list_variable_collections` (few, never paged) and `list_variables` to enumerate every variable — page `list_variables` with `offset`/`limit` (default 500). Omit `includeValues` for the catalog (metadata only); use `list_variables({includeValues:true})` or targeted reads when you actually need values.
+5. Call `list_variable_collections` (few, never paged) and `list_variables` to enumerate every variable — page `list_variables` with `offset`/`limit` (default 500). **Omit `includeValues` for the catalog (metadata only — `includeValues:false` is default)**; this keeps the catalog token-cheap. Only use `includeValues:true` or targeted `get_variable` reads when you actually need themed values for a specific task — never for the full catalog.
 6. Write `libraries/<fileKey>/file-library.md` with two sections:
 
    ```markdown
@@ -188,6 +188,17 @@ If `libraries/<fileKey>/file-library.md` already exists for the current file:
   - the library file looks stale/empty relative to what's on canvas.
 - When a live refresh is needed, only re-scan what changed if possible; otherwise re-run the full build steps above and overwrite the file.
 - Whenever you create a new component, style, or variable, append the new entry to the relevant section of `libraries/<fileKey>/file-library.md` immediately so it stays in sync without a full re-scan next time.
+
+### Reading variables without listing (token-cheap)
+
+Do **not** call `list_variables` to "see what's available" on every turn — it consumes tokens even paged. Prefer this cascade:
+
+1. **Cache first (zero bridge cost).** After `get_document_info` → `fileKey`, plain-read `libraries/<fileKey>/file-library.md` (and if `## Variables` is split, read only `libraries/<fileKey>/file-library.variables.<collection-slug>.md` for the collection you need — never all splits). This answers 95% of "what variables exist" without a bridge call. See `SKILL.md:118`.
+2. **One-variable read.** When you need a themed value for a known token, use `get_variable({name, collectionName})` or `get_variable({variableId})` — it returns `resolvedValuesByMode`/`resolvedValuesByModeName` (hex for colors) for all modes in one cheap row. Prefer this over `list_variables({includeValues:true})` per `SKILL.md:340`.
+3. **Filtered / paged list only when discovering.** If you must discover, filter: `list_variables({resolvedType:"COLOR", limit:50})` or `list_variables({collectionId, limit:50})`, or `export_tokens({collections:["<name>"], includeModes:false})` for a snapshot. Page with `offset` until `total`. Never call `list_variables({includeValues:true})` without a `resolvedType` or collection filter — and default `includeValues:false` for metadata-only discovery.
+4. **Usage inference (no catalog).** To check if a token is actually bound, use `find_nodes({hasBoundVariable:true, boundVariableId})` or `get_style_guide({rootNodeId})` instead of listing the whole catalog.
+
+Rule of thumb: catalog build = `includeValues:false`; value read = `get_variable` or `export_tokens` per collection; full `list_variables({includeValues:true})` is an anti-pattern unless you must audit every value at once.
 
 ### Component not found
 
@@ -378,8 +389,9 @@ Pass `verbose: true` to any of the four to get the original array-of-objects (or
 - `move_node` — absolute `x`/`y` or relative `dx`/`dy`; children of auto-layout parents are switched to absolute positioning so they can move freely
 - `reparent_node` (optional `index`) / `insert_child` — move (cut) any existing node into/out of frames, sections, groups, auto-layouts, slots, and pages; `index` controls order inside auto-layout containers
 - `get_parent_chain`
-- `resize_node`
-- `resize_to_fit` — two modes: (1) pass `targetNodeId` to scale the layer to fit inside that layer (aspect-preserving, centered; `fit: "contain"` letterboxes, `fit: "cover"` fills and crops); (2) omit `targetNodeId` to shrink-wrap the container tightly to its own children (Figma's "Resize to Fit")
+- `resize_node` — set explicit `width`/`height`. Use for fixed specs from the design or when a frame must be an exact size.
+- `resize_to_fit` — two modes: (1) pass `targetNodeId` to scale the layer to fit inside that layer (aspect-preserving, centered; `fit: "contain"` letterboxes, `fit: "cover"` fills and crops); (2) omit `targetNodeId` to shrink-wrap the container tightly to its own children (Figma's "Resize to Fit"). Prefer this over `resize_node` when fitting content, not spec'ing a size.
+- `bring_to_front` / `send_to_back` — reorder a layer within its parent's z-order (children[0] = back-most, children[last] = front-most). Use to fix stacking without reparenting.
 - `set_fill_color`
 - `set_stroke_color`
 - `set_corner_radius`
@@ -509,7 +521,9 @@ Use them when the user wants:
 
 Related: `export_node_as_image` (plugin-side, no token needed) also accepts a `localPath` to save the rendered node to disk instead of returning base64.
 
-## Preferred Decision Heuristics
+## Preferred Decision Heuristics — Product Designer Rules
+
+Think like a product designer, not a script: every tool call should serve a user problem, a layout constraint, or the design system's intent. Before picking a tool, ask: *what is the user trying to accomplish, what is the hierarchy, and what should stay system-driven vs. explicitly specified?* The rules below encode that judgment for every tool family.
 
 ### For text updates
 Use:
@@ -542,6 +556,42 @@ Prefer:
 - `generate_grid` for a fresh repeating grid of clones
 
 Avoid absolute-positioning everything if auto layout is already being used.
+
+### For resizing — `resize_to_fit` vs `resize_node` (product designer rule)
+Use `resize_to_fit` when the intent is to **fit**, not to spec:
+- **Shrink-wrap (no `targetNodeId`)**: a container/frame/section tightly wraps its children. Use when you just added/removed children, changed text, or updated a card and need the parent to hug its content again. This is the Figma "Resize to Fit" command — do not hardcode a width/height that you could derive from children.
+- **`targetNodeId` with `fit: "contain"`**: scale an image, icon, or media layer to fit entirely inside a target frame without cropping (letterboxes). Use for responsive image fills, avatar → frame, logo → container.
+- **`targetNodeId` with `fit: "cover"`**: fill the target fully, cropping overflow. Use for hero/cover images where filling the bounds matters more than showing the whole asset. Both `contain`/`cover` preserve aspect ratio and center the layer.
+
+Use `resize_node` when the spec is **explicit**: a 320×200 card, a 1440px page frame, a fixed avatar 40×40. If you catch yourself computing `width = sum(children) + padding`, you probably want `resize_to_fit` instead.
+
+Never use either on an auto-layout parent that already sizes itself — auto layout will fight your explicit size. For auto-layout frames, let layout do its job; use `set_layout_sizing` / padding / gap to influence size instead.
+
+### For text — hug vs fill vs fixed (product designer rule)
+
+Text frames have two independent modes: **auto-layout sizing** (`set_layout_sizing` HUG/FILL) and **text auto-resize** (`textAutoResize` on the TextNode itself). Keep them aligned:
+
+- **Hug contents — Auto-width** (`textAutoResize: "WIDTH_AND_HEIGHT"` + `set_layout_sizing({width:"HUG", height:"HUG"})` / Figma UI "Hug" / "Auto width"): the text box shrinks/grows to its characters with no wrapping (single-line hug). Use for labels, buttons, chips, badges, captions — anything where the container should be driven by content length. A `Button` set to hug will stay pill-tight regardless of label ("Save" vs "Save changes"). Prefer auto-width for inline elements, tags, and when you don't yet know the copy length. **Plugin:** keep as `WIDTH_AND_HEIGHT`; do not call `resize_node` — let hug drive size. Width/height are derived, not set.
+- **Fill container + Auto-height** (`textAutoResize: "HEIGHT"` + `width:"FILL"` / "Fill" + "Auto height"): the text fills the parent's available width and wraps, height auto-adjusts to content. Use for body copy inside a column, inputs that should span the form width, titles that should wrap to the column, or any text that must align to a grid/column. Fill only makes sense inside an auto-layout parent — outside it, it behaves like fixed. **Plugin:** use `WIDTH_AND_HEIGHT` → `HEIGHT` switch via the plugin's text-frame control; then change **width only** (`resize_node({width})` or `set_layout_sizing({width:"FILL", height:"HUG"})`) — height stays auto.
+- **Fixed size** (`textAutoResize: "NONE"` + explicit `width`/`height`): use only when the spec gives an explicit size (e.g., a 320px card's title must be 280×48). Avoid fixed for text that will be translated or is user-generated. **Plugin:** `NONE` allows changing **both width and height** via `resize_node({width, height})`; text truncates/overflows instead of rewrapping.
+
+Decision checklist before setting text size:
+1. Is the text inside an auto-layout frame? If no → auto-width (hug) is safe default; fixed only with a spec.
+2. Is it a control that should size to its label? → Auto-width.
+3. Is it content that should line-wrap to the column? → Auto-height + Fill width.
+4. Is the design responsive? Prefer auto-width for components, auto-height+Fill for layout-level text, never fixed without a reason. Annotate the choice (see Dev Handoff).
+
+Switching rules (plugin must enforce):
+- Auto-width (`WIDTH_AND_HEIGHT`): no explicit `resize_node` width/height — size is content-driven.
+- Auto-height (`HEIGHT`): allow **width** changes only; height is auto.
+- Fixed (`NONE`): allow **both width and height** changes; both are explicit.
+- Always use `set_layout_sizing` (or `set_auto_layout` with sizing) for HUG/FILL intent, and the TextNode's `textAutoResize` control for wrapping intent — `resize_node` on a text node forces a fixed size and breaks hug/fill. Never `resize_node`/`resize_to_fit` on an auto-layout parent that already sizes itself.
+
+### For layer order — `bring_to_front` / `send_to_back`
+- Use `bring_to_front` to bring a layer to the front of its current parent's stack (e.g., a tooltip over a card, a modal overlay above content) without moving it to another frame. It keeps the node in place and just reorders z-index.
+- Use `send_to_back` to push a background, decoration, or backdrop behind siblings (e.g., a fill rectangle should sit behind card content). 
+- For fine-grained z-order (second-from-front, between two siblings) use `reparent_node` or `insert_child` with an explicit `index` instead — front/back are just shortcuts for `index = 0` and `index = last`.
+- Never reparent just to reorder — keep the hierarchy, only change z-order.
 
 ### For design-system generation
 Prefer:
@@ -609,7 +659,13 @@ when the user clearly asked for removal or reset-like behavior.
 
 **Deleting top-level content needs explicit confirmation.** `delete_node` / `delete_multiple_nodes` refuse to remove a **page**, a **top-level frame**, or a **top-level section** unless you pass `confirmFrameOrPageDeletion: true` on the same call. When the user asks you to delete such a node, pass that flag; do not surprise-delete large top-level content without it.
 
-## Recommended Interaction Pattern
+### For product design — choosing the right tool family
+As a product designer, map the user's intent to the tool family before picking a specific tool:
+- **Structure first, style second.** Create or select the parent frame/section, set its auto-layout, then adjust children. Never style children before the layout is correct.
+- **Reuse > create > style.** Check the library (`libraries/<fileKey>/file-library.md`) for a component/variable/style; instantiate or bind it. Only create primitives for true layout containers.
+- **Variables are the source of truth.** In a file with collections/modes, change theme or brand via `set_variable_mode` / `set_variable_values` / `get_variable`, not by overwriting hexes. Use `list_variables({includeValues:true})` to verify the mode matrix before editing.
+- **Scope narrowly, verify widely.** `set_target_frame` to the frame the user means, use `read_my_design` with `maxDepth` to inspect, make the edit, then re-read the subtree and confirm it matches the spec.
+- **When in doubt, ask.** If the intent is ambiguous (which mode, which frame, hug vs fill), ask for one clarification rather than guessing and producing drift.
 
 Use this sequence for most editing tasks:
 1. Load the current file's `libraries/<fileKey>/file-library.md` if present, or build it on first use, then map every planned element to a cataloged component before building (see "Component Reuse First" — this step is mandatory, not a preference).

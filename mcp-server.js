@@ -848,6 +848,8 @@ const ALLOWED_MCP_TOOLS = new Set([
   "create_typography_scale",
   "generate_palette",
   "extract_component_set",
+  "bring_to_front",
+  "send_to_back",
   "search_components"
 ]);
 
@@ -1649,16 +1651,31 @@ server.registerTool(
 );
 
 server.registerTool(
-  "set_focus",
+  "send_to_back",
   {
-    title: "Set focus",
-    description: "Set focus on a specific node by selecting it and scrolling viewport to it.",
+    title: "Send to back",
+    description: "Send a layer to the back of its parent (z-order). In Figma, children[0] is back-most.",
     inputSchema: {
-      nodeId: z.string()
+      nodeId: z.string().describe("The layer to send to the back.")
     }
   },
   async ({ nodeId }) => {
-    const result = await sendCommand("set_focus", { nodeId });
+    const result = await sendCommand("send_to_back", { nodeId });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "bring_to_front",
+  {
+    title: "Bring to front",
+    description: "Bring a layer to the front of its parent (z-order). In Figma, children[last] is front-most.",
+    inputSchema: {
+      nodeId: z.string().describe("The layer to bring to the front.")
+    }
+  },
+  async ({ nodeId }) => {
+    const result = await sendCommand("bring_to_front", { nodeId });
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
