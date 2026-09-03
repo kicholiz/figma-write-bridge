@@ -85,12 +85,33 @@ Target-frame enforcement:
 - Still self-enforce scope discipline (pick a frame before writing, stay inside it) — enforcement is a safety net, not a substitute for choosing the right scope.
 - Note: `bulk_rename`, `bulk_update`, `replace_all_instances`, and `set_variable_mode` only check that their `rootNodeId` is inside the target (they may touch descendants outside the frame when given a broad root); scope those calls explicitly.
 
+## Figma Schema Validation (Read Before Writing Fills, Effects, Grids, Reactions)
+
+Figma validates `fills`, `effects`, `layoutGrids`, `reactions`, and `annotations` against a **closed schema**. Two failure modes matter:
+
+- **A missing required key** — e.g. `Required value missing at [0].blendMode`.
+- **An extra key the variant does not declare** — e.g. `Unrecognized key(s) in object: 'matchLayers' at [0].actions[0].transition`.
+
+The bridge normalizes every one of these payloads for you, so you generally just pass plain values. The rules matter when you are deciding *what* to send:
+
+- **Never echo a value you read back into a setter.** A paint, effect, grid, or reaction read from a node carries read-only extras (`boundVariables`, `noiseSizeVector`, …) that the setter rejects. Send only the fields you intend to change.
+- **Effects** — `DROP_SHADOW`/`INNER_SHADOW` need `color`, `offset`, `radius`, `visible`, `blendMode` (the bridge defaults `visible: true`, `blendMode: "NORMAL"`). `LAYER_BLUR`/`BACKGROUND_BLUR` also need `blurType`: `"NORMAL"`, or `"PROGRESSIVE"` plus `startRadius`/`startOffset`/`endOffset`. `showShadowBehindNode` is `DROP_SHADOW`-only. `NOISE`, `TEXTURE`, and `GLASS` are also supported.
+- **Transitions** — `DISSOLVE`, `SMART_ANIMATE`, and `SCROLL_ANIMATE` accept **only** `{type, duration, easing}`. Adding `direction` or `matchLayers` fails validation. Only `MOVE_IN`, `MOVE_OUT`, `PUSH`, `SLIDE_IN`, `SLIDE_OUT` take those two.
+- **Layout grids** — `sectionSize` is invalid when `alignment` is `STRETCH`; `offset` is invalid when `alignment` is `CENTER`.
+- **Solid paints** — opacity belongs on the paint (`{type:"SOLID", color:{r,g,b}, opacity:0.5}`), not as an `a` channel inside `color`.
+- **Grid layout** — `gridAutoTracks` is `NONE`/`ROWS` and `gridItemsPositioning` is `MANUAL`/`ROW_AUTO_FLOW`; track types are `FLEX`/`FIXED`/`HUG`.
+- **Motion easing** — the transition easings plus `HOLD`. `EASE_IN_AND_OUT` is the correct spelling; `EASE_IN_OUT` is rejected, as are internal names like `OUT_CUBIC`.
+
+Under `documentAccess: "dynamic-page"` (this plugin's manifest) two more rules apply, and the bridge already handles both — do not work around them:
+- Pages load lazily. Anything that traverses the whole document loads all pages first, which is why file-wide reads cost more than page-scoped ones. Prefer `rootNodeId`/page scope over `allPages: true` unless you need it.
+- **Selection is per-page.** `set_focus` and `set_selections` switch to the node's page automatically; a selection still cannot span two pages, so `set_selections` reports leftovers in `skippedOnOtherPages`.
+
 ## Required Preconditions
 
 Before any editing session, verify:
 1. The bridge is reachable with `figma_bridge_status`.
 2. The expected channel is active (defaults to `default`; matches the server's `FIGMA_BRIDGE_CHANNEL`). Use `figma_bridge_status` to see it and `join_channel` if needed.
-3. The correct Figma file is open via `get_document_info` or `figma_get_document_info`.
+3. The correct Figma file is open via `get_document_info`.
 4. The user’s intended frame is selected, or you can identify it from the document.
 5. You have a clear parent/container before creating nodes.
 
@@ -224,7 +245,8 @@ Cover these on every screen — skip a category only when it genuinely doesn't a
 - **Interactive elements** — what each button/link/input does: target screen, submit action, validation rules, disabled conditions.
 - **States not drawn on canvas** — loading, empty, error, disabled, hover/focus, and what triggers each. If you only built the happy path, annotate that explicitly rather than leaving it implied.
 - **Content rules** — which text is static vs. dynamic, data source, truncation/overflow behavior, character limits, pluralization, date/number formatting.
-- **Responsive intent** — which elements fill vs. hug, min/max widths, wrap and reflow behavior, breakpoint differences.
+- **Responsive intent** — which elements fill vs. hug, min/max widths, wrap and reflow behavior, breakpoint differences. For a grid section, say which tracks are fixed vs. flexible and what should happen as the grid narrows.
+- **Motion** — for anything animated, the trigger, duration, easing, and what is animating. Motion lives on a timeline the engineer cannot see in a static export, so it has to be written down.
 - **Tokens** — where a value is deliberately a specific variable/style, and anything intentionally hardcoded (with the reason).
 - **Accessibility** — heading order, alt text for meaningful images, focus order, label associations, and anything with a non-obvious accessible name.
 - **Open questions** — anything you assumed while building. Annotate the assumption on the node rather than only mentioning it in chat, so it survives the handoff.
@@ -236,8 +258,9 @@ Use `categoryId` consistently if the file has annotation categories — read the
 ### Related handoff setup
 
 While you're finishing a screen, also make sure the prototype layer is coherent, since it's part of what dev reads:
-- `set_reactions` / `upsert_reaction` so interactive elements actually point at their destinations
-- `set_prototype_start_node` / `set_flow_starting_points` so the flow has a named entry point
+- Wire the frame-to-frame links with `set_transition_reaction` (or `set_reactions` for multi-action triggers) so the flow is clickable, not just drawn.
+- `set_prototype_start_node` / `set_flow_starting_points` so the flow has a named entry point.
+- `set_overlay_settings` on any frame used as an overlay, so it anchors and scrims correctly.
 
 Keep annotations short and specific — one to three sentences per node. They're a spec, not prose; long paragraphs get ignored on canvas.
 
@@ -254,8 +277,8 @@ If the user explicitly says they don't want annotations, skip them — but say o
 ### 1. Preflight
 Run this fully only once per session (or after a reconnect):
 - `figma_bridge_status`
-- `get_document_info` or `figma_get_document_info`
-- `get_selection` or `figma_get_selection`
+- `get_document_info`
+- `get_selection`
 
 If multiple files may be open:
 - confirm the correct channel (it must match the `FIGMA_BRIDGE_CHANNEL` of the MCP server you're using — `default` unless overridden)
@@ -275,7 +298,7 @@ If the user wants edits inside an existing frame:
 - call `set_target_frame` with that `frameId`
 
 If no frame exists yet:
-- create one with `create_frame` or `figma_create_frame`
+- create one with `create_frame`
 - then immediately treat the new frame as the active work area
 
 Even after `set_target_frame`, still manually avoid touching unrelated nodes.
@@ -339,6 +362,8 @@ Pass `verbose: true` to any of the four to get the original array-of-objects (or
 - `get_selection_context` — bundles selection + node info + (for instances) main component id, property definitions, current property values, and slots in one call. Prefer this over chaining `get_selection` → `get_node_info` → `get_component_property_definitions` when you need more than just id/name/type.
 - `find_nodes` — server-side predicate query; the node graph is filtered inside Figma and only matches come back, so "all red button instances" or "all hardcoded fills with no style" costs a handful of rows instead of a full tree dump filtered in context. Predicates (all optional, ANDed): `types`, `name` (glob), `nameRegex`, `textContains`, `fillHex` (+ `fillTolerance` for near-shades), `fillStyleId`, `textStyleId`, `missingFillStyle` (hardcoded color with no style/variable — design-system drift), `hasBoundVariable`/`boundVariableId`, `hasOverrides`/`mainComponentName` (instances), `visible`, `rootNodeId`, `allPages`. Paginate with `limit`/`offset`; `total`/`truncated` reflect the full match count, not just the returned page. Prefer this over `scan_nodes_by_types` or `get_document_tree` + manual filtering whenever the query is more selective than "give me every node of type X".
 - `read_my_design`
+- `set_focus` — select one node and scroll the viewport to it, switching to its page first. Use it to show the user what you just built or found (ids from a cross-page `find_nodes` work directly).
+- `set_selections` — select several nodes at once. Switches to the first node's page; Figma scopes selection to one page, so anything elsewhere comes back in `skippedOnOtherPages`.
 - `get_node_info`
 - `get_nodes_info`
 - `scan_text_nodes`
@@ -383,6 +408,9 @@ Pass `verbose: true` to any of the four to get the original array-of-objects (or
 - `create_component_instance`
 - `create_instance_from_component_key`
 - `create_instance_from_set_key`
+- `create_instance_from_instance` — make a fresh instance of whatever component an existing instance points at, without needing its id or key. Use it when you found a usage on canvas and want another one.
+- `clone_node` — duplicate a node in place, beside its original
+- `clone_node_into_parent` — duplicate a node directly into a chosen parent (and optional `index`), which beats `clone_node` + `reparent_node` as two calls
 
 ### Update Nodes
 - `rename_node`
@@ -392,17 +420,17 @@ Pass `verbose: true` to any of the four to get the original array-of-objects (or
 - `resize_node` — set explicit `width`/`height`. Use for fixed specs from the design or when a frame must be an exact size.
 - `resize_to_fit` — two modes: (1) pass `targetNodeId` to scale the layer to fit inside that layer (aspect-preserving, centered; `fit: "contain"` letterboxes, `fit: "cover"` fills and crops); (2) omit `targetNodeId` to shrink-wrap the container tightly to its own children (Figma's "Resize to Fit"). Prefer this over `resize_node` when fitting content, not spec'ing a size.
 - `bring_to_front` / `send_to_back` — reorder a layer within its parent's z-order (children[0] = back-most, children[last] = front-most). Use to fix stacking without reparenting.
-- `set_fill_color`
+- `set_fill_color` (`figma_set_solid_fill` is a hex-taking shorthand for the same thing)
 - `set_stroke_color`
 - `set_corner_radius`
-- `set_text_content`
+- `set_text_content` (`figma_set_text` is a shorthand alias)
 - `set_multiple_text_contents`
 - `set_text_style` (apply an existing text style and/or fine-grained typography + variable binding)
 
 ### Fills & Effects
 - `set_image_fill` — IMAGE fill from a URL, raw base64, or a local file via `localPath` (the server reads the file to base64); `scaleMode` FILL/FIT/CROP/TILE, `paintIndex`, `rotation`
 - `set_gradient_fill` — LINEAR/RADIAL/ANGULAR/DIAMOND with `stops`, optional `from`/`to` transform points, `opacity`, `paintIndex`
-- `set_effects` — raw effects (DROP_SHADOW, INNER_SHADOW, LAYER_BLUR, BACKGROUND_BLUR) or apply an existing `effectStyleId`; `boundVariables.color` binds a variable
+- `set_effects` — raw effects or an existing `effectStyleId`; `boundVariables.color` binds a variable. Supported types: `DROP_SHADOW`, `INNER_SHADOW`, `LAYER_BLUR`, `BACKGROUND_BLUR` (both `blurType: "NORMAL"` and `"PROGRESSIVE"`), `NOISE` (`MONOTONE`/`DUOTONE`/`MULTITONE`), `TEXTURE`, `GLASS`. Required keys are filled in for you — pass the values you care about and let the bridge complete the shape (see "Figma Schema Validation").
 
 ### Vector & Structure
 - `set_vector_paths` — replace SVG path data on a VECTOR
@@ -437,9 +465,24 @@ Pass `verbose: true` to any of the four to get the original array-of-objects (or
 - `set_axis_align`
 - `set_layout_sizing`
 - `set_item_spacing`
-- `set_layout_grids`
+- `set_layout_grids` — `ROWS`/`COLUMNS` (with `alignment`, `gutterSize`, `count`, and `sectionSize` only when alignment is not `STRETCH`) or `GRID` (with `sectionSize`). These are visual layout *guides*, not a layout mode — for real grid layout see `set_grid_layout` below.
+- `set_grid_layout` — turn a frame into a **GRID auto-layout** container (the third `layoutMode` beside `HORIZONTAL`/`VERTICAL`, where children occupy cells rather than one flow). Sets `rowCount`/`columnCount`, `rowGap`/`columnGap`, and per-track `rowSizes`/`columnSizes` — each entry a number (fixed px) or `{type: 'FLEX'|'FIXED'|'HUG', value}`, where `FLEX` tracks split leftover space by weight.
+- `get_grid_layout` — read a grid's tracks, gaps, and every child's cell/span/alignment. Returns `isGrid: false` for a non-grid frame. Call it before repositioning children so you know the bounds.
+- `set_grid_child_position` — place a child: 0-based `row`/`column` anchors, `rowSpan`/`columnSpan`, and `horizontalAlign`/`verticalAlign` (`MIN`/`CENTER`/`MAX`/`AUTO`, where `AUTO` stretches). Anchor + span must fit inside the grid.
+- `reorder_grid_tracks` — move whole rows/columns (`axis`, `fromIndices`, `insertionIndex`), carrying their children along.
 - `distribute_nodes` — space/align an arbitrary set of nodes along `axis` (horizontal|vertical): `mode` `gap` (fixed `gap`), `spaceBetween`/`evenly` (fill bounds), or `center`; `crossAlign` none|start|center|end; `bounds {x1,y1,x2,y2}` overrides the default parent-based bounds. Auto-layout children are switched to absolute positioning first.
 - `arrange_children` — same distribution options applied to the direct children of a `parentNodeId`. On auto-layout parents it is skipped with a notice (layout already arranges them).
+
+### Motion (Timeline Animation)
+Distinct from prototype reactions: reactions link frames on click, Motion animates properties over a timeline **inside** one top-level frame. The whole surface is gated behind a Figma feature flag — `get_motion` returns `motionEnabled: false` when the account lacks it, and the write tools return one clear error. Do not retry on that error.
+- `get_motion` — read timelines (durations in seconds), manual keyframe tracks, applied animation styles, and resolved animations, for given nodes or the current selection. Always start here.
+- `set_keyframe_track` — add/replace one track. `field` is a property (`TRANSLATION_X`/`_Y`/`_XY`, `ROTATION`, `SCALE_X`/`_Y`/`_XY`, `OPACITY`, `CORNER_RADIUS` and the per-corner variants, `STROKE_WEIGHT` and the per-border variants, `WIDTH`, `HEIGHT`, `STACK_*`/`GRID_*` spacing, `PATH_TRIM_START`/`_END`) — or `FILLS`/`STROKES`/`EFFECTS` **with a `paintIndex`** for color/effect animation.
+- `remove_keyframe_track` — drop one track by field, or `all: true` to clear them.
+- `list_animation_styles` / `apply_animation_style` / `remove_animation_style` — reusable animation presets. List first for a real `styleId`; `duration` and `timelineOffset` are seconds and top-level, not `props`. Verify against `animationStyles` in the response, not `animations`.
+- `set_timeline_duration` — set the containing top-level frame's timeline length in seconds.
+
+### Shaders
+- `list_shaders` — enumerate shader effects/fills available to the file with their property definitions. Returns an empty list when the account has none published.
 
 ### Design Tokens
 - `export_tokens` — dump all local variables as a W3C-style Design Tokens JSON (nested by collection/variable name, colors as hex) plus a flat `variables` list; `includeModes: false` skips the per-mode views. Handy to snapshot a file's token set for reuse across files or to send to the user as a spec.
@@ -455,6 +498,8 @@ Pass `verbose: true` to any of the four to get the original array-of-objects (or
 - `get_instance_properties`
 - `set_instance_properties`
 - `swap_instance_component`
+- `add_component_property` / `edit_component_property` / `delete_component_property` — author a component's property schema (`VARIANT`, `BOOLEAN`, `TEXT`, `INSTANCE_SWAP`). Definitions live on the **component set** when the component is a variant; the bridge resolves that for you, so pass either the set or any variant.
+- `bind_component_property` — point a layer's `visible` / `characters` / `mainComponent` field at a declared property, which is what actually makes the property do something
 - `create_component_slot`
 - `edit_component_slot`
 - `delete_component_slot`
@@ -547,6 +592,15 @@ Prefer:
 
 Avoid detaching or rebuilding instances unless the user explicitly asks. If a named component isn't in `libraries/<fileKey>/file-library.md` or on canvas, ask the user before creating it (see "Component not found" above).
 
+### For grid layout
+Reach for `set_grid_layout` when the content is genuinely two-dimensional — a card grid, a dashboard, a pricing table, a calendar — where items must line up across both rows *and* columns. Nested horizontal/vertical auto-layouts cannot keep columns aligned across rows; a grid can.
+Stay with `set_auto_layout` for one-directional content: toolbars, lists, stacks, button rows.
+Order matters, and grids have two placement rules that bite in opposite directions:
+1. Set the container up with `set_grid_layout` — counts and gaps first, then track sizes.
+2. Place and widen any **spanning** child before the children that sit beside it. A span cannot cross an occupied cell, so a card added to column 1 blocks a later attempt to span columns 1–2. Adding the wide one first works; widening it afterwards does not.
+3. A span is also rejected if anchor + span exceeds the track count — grow the grid before widening a child.
+4. Children keep their own size in a cell. Set `horizontalAlign`/`verticalAlign` to `AUTO` on an axis to stretch them to fill it.
+
 ### For layout work
 Prefer:
 - creating or identifying a parent frame first
@@ -587,9 +641,15 @@ Switching rules (plugin must enforce):
 - Fixed (`NONE`): allow **both width and height** changes; both are explicit.
 - Always use `set_layout_sizing` (or `set_auto_layout` with sizing) for HUG/FILL intent, and the TextNode's `textAutoResize` control for wrapping intent — `resize_node` on a text node forces a fixed size and breaks hug/fill. Never `resize_node`/`resize_to_fit` on an auto-layout parent that already sizes itself.
 
+### For text wrapping and truncation
+`set_text_style` also carries the paragraph-level controls:
+- `textWrapStyle`: `BALANCE` evens out line lengths — the right choice for headings and short display text. `PRETTY` avoids leaving a single word on the last line, good for body copy. `AUTO` is the default.
+- `textTruncation: 'ENDING'` plus `maxLines` caps a block with an ellipsis. `maxLines` needs truncation on to have any effect; pass `maxLines: null` to clear the cap.
+Prefer these over manually shortening copy — they keep the real content in the file for the engineer reading it.
+
 ### For layer order — `bring_to_front` / `send_to_back`
 - Use `bring_to_front` to bring a layer to the front of its current parent's stack (e.g., a tooltip over a card, a modal overlay above content) without moving it to another frame. It keeps the node in place and just reorders z-index.
-- Use `send_to_back` to push a background, decoration, or backdrop behind siblings (e.g., a fill rectangle should sit behind card content). 
+- Use `send_to_back` to push a background, decoration, or backdrop behind siblings (e.g., a fill rectangle should sit behind card content).
 - For fine-grained z-order (second-from-front, between two siblings) use `reparent_node` or `insert_child` with an explicit `index` instead — front/back are just shortcuts for `index = 0` and `index = last`.
 - Never reparent just to reorder — keep the hierarchy, only change z-order.
 
@@ -606,14 +666,40 @@ Prefer:
 ### For multi-step edits
 When a request decomposes into more than ~3 independent bridge calls (e.g. "make all 5 buttons in this row the same fill and corner radius"), prefer one `run_batch` call over 5 separate tool calls — it's one WebSocket round trip instead of five, and you still get a per-step result/error back. For edits with meaningful blast radius on existing nodes, call `create_checkpoint` on the affected nodeIds first so you have a `restore_checkpoint` fallback if the batch produces something the user doesn't want. For quick single property edits, `undo` / `redo` can reverse the last action without a checkpoint, but don't rely on it across a long batch — checkpoints are the durable restore path.
 
-### For prototyping / motion
-Use:
-- `set_transition_reaction` / `set_smart_animate_reaction` for node-to-node interactions with typed transition/easing payloads
-- `set_reactions` / `upsert_reaction` directly when you need multiple actions on one trigger (pass `actions: [...]` instead of a single `action`)
-- `get_overlay_settings` / `set_overlay_settings` when the reaction's navigation is `OVERLAY`, to configure anchor position, scrim background, and click-outside-to-close
-- `get_prototype_settings` / `set_prototype_start_node` / `set_flow_starting_points` for the Present entry point and named Flows
+### For prototyping (frame-to-frame links)
+Prefer:
+- `set_transition_reaction` for a single frame-to-frame link with an explicit transition — this is the default tool for "link A to B". `set_smart_animate_reaction` is the same thing with `SMART_ANIMATE` preselected.
+- `set_reactions` when one trigger fires several actions, or when you are replacing a node's whole interaction set. `upsert_reaction` to change one interaction without disturbing the others.
+- `get_animation_presets` to look up valid transition types, easing names, and curated presets before authoring a transition.
+- `get_overlay_settings` / `set_overlay_settings` to control how an overlay anchors and scrims, alongside the reaction whose `navigation` is `OVERLAY`.
+- `get_prototype_settings` / `set_prototype_start_node` / `set_flow_starting_points` for the Present entry point and named Flows.
 
-Smart Animate itself has no scriptable keyframe/timeline API to call into — it always auto-interpolates between two frames/variants based on the duration+easing you set. There's nothing beyond the reaction/transition tools above to reach for.
+Destination rules — a NODE action fails with `Reaction at index N was invalid` when the destination does not suit its navigation type:
+
+| `navigation` | Destination must be |
+|---|---|
+| `NAVIGATE`, `SWAP` | a **top-level** frame on a page (not a nested child) |
+| `OVERLAY` | a frame configured as an overlay |
+| `SCROLL_TO` | a node inside a scrollable ancestor of the source |
+| `CHANGE_TO` | a sibling variant in the **same component set** as the source |
+
+Transitions are validated strictly — see "Figma Schema Validation" above; `direction`/`matchLayers` belong only to the directional types.
+
+Smart Animate itself still auto-interpolates between two frames — there is no per-property control *within a Smart Animate transition*. Property-level animation is a separate feature: see "For motion / animation" below.
+
+### For motion / animation
+Two different features — pick by what the user is describing:
+- **"When I click this, go to that screen"** → a prototype reaction (`set_transition_reaction`, `set_reactions`). See "For prototyping (frame-to-frame links)".
+- **"Make this fade in / slide up / pulse"** → Motion keyframes on the element itself (`set_keyframe_track`), which animate properties along the frame's timeline.
+
+Working rules:
+1. `get_motion` first — read the existing tracks and the timeline duration before writing, and confirm `motionEnabled`.
+2. Animate **descendants**, not the top-level frame: that frame owns the timeline rather than animating on it, so keyframes there do nothing. The bridge refuses it unless you pass `allowTopLevelFrame: true`.
+3. Transform fields (`TRANSLATION_*`, `ROTATION`, `SCALE_*`) **compose** with the node's resting transform — neutral is `0`, or `1` for scale. Everything else replaces the value. So `SCALE_X: 1` means "unchanged", not "collapse".
+4. Positions are seconds. The first keyframe's value holds back to `t=0` and the last holds to the end, so don't add padding keyframes just to pin the resting state.
+5. Easing on a keyframe describes the move **into** it, so easing on the first keyframe is ignored. `HOLD` gives step interpolation. Use `EASE_IN_AND_OUT`, never `EASE_IN_OUT`.
+6. The bridge lengthens the timeline automatically when your animation runs past it (pass `extendTimeline: false` to opt out). It never shortens it on your behalf — that would truncate existing motion — so reach for `set_timeline_duration` deliberately, and only when the user asks.
+7. Prefer an existing animation style (`list_animation_styles` → `apply_animation_style`) when the file already uses one for that gesture, the same way you prefer an existing component over primitives.
 
 ### For styling
 Prefer:
@@ -693,9 +779,9 @@ Use this sequence for most editing tasks:
 3. Check `libraries/<fileKey>/file-library.md` (build it first if this is the first use in the file — see "First use in a file"). Plan the screen against its cataloged components: use `create_instance_from_component_key` / `create_instance_from_set_key` / `create_component_instance` wherever a listed component matches, and only fall back to primitives for elements the library doesn't cover.
 4. `create_frame`
 5. `set_target_frame`
-6. `set_auto_layout`
+6. `set_auto_layout` for one-directional sections, or `set_grid_layout` + `set_grid_child_position` when the section is a true two-dimensional grid (cards, dashboard tiles, pricing columns)
 7. `create_text`, `create_rectangle`, or component-instance tools for anything not covered by the library
-8. `set_reactions` / `upsert_reaction` for interactive elements, and `set_flow_starting_points` if this screen starts a flow
+8. `set_transition_reaction` to wire interactive elements to their destinations, and `set_flow_starting_points` if this screen starts a flow
 9. `set_multiple_annotations` to annotate the screen for dev handoff — components + variants used, interactions, undrawn states, content rules, responsive intent, a11y, and any assumptions (see "Dev Handoff Annotations")
 10. `get_node_info` to verify structure and `get_annotations` to confirm the notes landed
 
@@ -707,10 +793,21 @@ Use this sequence for most editing tasks:
 5. verify with `get_instance_source` and `get_instance_properties`
 
 ### Add prototype behavior
-1. identify source and destination nodes
-2. verify current state with `get_reactions`
-3. apply with `set_reactions` or `upsert_reaction`
-4. confirm the final reaction graph
+1. `get_reactions` on the source nodes to see what already exists
+2. confirm the destination is a valid target for the navigation type (see the table under "For prototyping (frame-to-frame links)") — for `NAVIGATE`, that means a top-level frame
+3. `get_animation_presets` if you need the exact transition/easing spelling
+4. `set_transition_reaction` per link (or one `run_batch` of them for a whole flow); `set_reactions` when a trigger needs several actions
+5. `set_overlay_settings` for any overlay destination
+6. `set_prototype_start_node` / `set_flow_starting_points` to name the flow's entry point
+7. `get_reactions` again to confirm the final graph
+
+### Animate an element on the timeline
+1. `get_motion` on the target to read existing tracks, the timeline duration, and confirm `motionEnabled`
+2. pick the element to animate — a **descendant**, never the top-level frame that owns the timeline
+3. `list_animation_styles` and reuse one with `apply_animation_style` if the file already has a style for this gesture
+4. otherwise `set_keyframe_track` per property — remember transform fields compose with the resting transform (neutral `0`, or `1` for scale)
+5. the timeline auto-extends to fit; call `set_timeline_duration` only to set an explicit length
+6. `get_motion` again to confirm the tracks landed, and annotate the motion intent for dev handoff
 
 ## Failure Handling
 
@@ -728,6 +825,22 @@ Common causes:
 - wrong node id
 - trying to mutate a node type that does not support that property
 - missing `FIGMA_TOKEN` for REST API tools
+
+Error messages worth recognizing:
+
+| Message | Cause | Fix |
+|---|---|---|
+| `Unrecognized key(s) in object: '<key>'` | An extra key the schema variant does not declare — usually a value read off a node and passed straight back in | Send only the fields you mean to set; see "Figma Schema Validation" |
+| `Required value missing at [0].<key>` | A required field omitted from an effect or paint | Supply it, or let the bridge default it by passing the simple form |
+| `Reaction at index N was invalid` | The prototype **destination** was rejected, not the action type | Check the destination table under "For prototyping (frame-to-frame links)" |
+| `Can only get component property definitions of a component set or non-variant component` | Property definitions were read off a variant | Pass the parent component set (the bridge promotes automatically on its own tools) |
+| `Setting figma.currentPage is not supported` | Something bypassed `set_current_page` | Use `set_current_page`; report it, since bridge tools should never raise this |
+| `outside the target frame` | A target-frame lock is active | `get_target_frames` to see it, `clear_target_frames` to release it |
+| `Action not allowed: <name>` | The plugin build predates the tool | The plugin's `code.js` is stale — ask the user to reload the plugin in Figma |
+| `Motion APIs are not enabled for this Figma user` | The account lacks the Motion feature flag | Report it once and stop — do not retry. Prototype reactions still work |
+| `span exceeds grid column count` / the bridge's `columnSpan … exceeds the grid's N columns` | A grid child was given a span that runs past the last track | Raise `columnCount` via `set_grid_layout`, or reduce the span |
+| `Cannot set child to specified column span due to existing children in adjacent columns` | The span would cross a cell another child already occupies | Place and widen the spanning child before adding its neighbours, or move the blocking child first |
+| `This is a top-level frame, which owns the timeline` | Keyframes were aimed at the frame that owns the timeline | Animate a descendant, or pass `allowTopLevelFrame: true` if you really mean it |
 
 ## Context Discipline
 

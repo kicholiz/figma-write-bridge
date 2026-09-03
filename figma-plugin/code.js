@@ -15,11 +15,6 @@ const defaultChannel = "default";
 const defaultWsUrl = `ws://${defaultHost}:${defaultPort}`;
 const defaultHostPort = `${defaultHost}:${defaultPort}`;
 
-// Server discovery: the plugin probes this localhost port range for running
-// figma-write-bridge MCP servers (GET /health) so the user can pick which AI
-// agent's server to connect to from a dropdown. Covers the documented default
-// 8787 plus ~10 extra agent ports; each agent's server should use a distinct
-// FIGMA_BRIDGE_PORT inside this range.
 const scanPortStart = 8787;
 const scanPortCount = 11;
 const scanTimeoutMs = 400;
@@ -512,8 +507,6 @@ const uiHtml = `<!doctype html>
 
 figma.showUI(uiHtml, { width: 380, height: 545 });
 
-// File identity is reported to the UI (which holds the WebSocket) so the bridge
-// server can surface which file each channel is connected to (channel dashboard).
 try {
   figma.ui.postMessage({
     type: "meta",
@@ -525,14 +518,7 @@ try {
 // ---------------------------------------------------------------------------
 // Server discovery
 // ---------------------------------------------------------------------------
-// scanServers probes the localhost scan range for running figma-write-bridge
-// MCP servers (each agent runs its own on a distinct FIGMA_BRIDGE_PORT), then
-// posts the list to the UI so the user can pick one from a dropdown and connect.
-// Probing runs in the main thread (which has fetch) and relays via postMessage.
 
-// The server binds and advertises 127.0.0.1, but Figma's manifest allowlist
-// cannot contain raw IPs, so every host the UI connects to must be the
-// loopback *name*. Non-loopback hosts are left alone.
 function connectableHost(host) {
   const value = String(host || "").trim();
   if (!value || value === "127.0.0.1" || value === "::1" || value === "0.0.0.0") return defaultHost;
@@ -576,7 +562,6 @@ async function scanServers() {
   return servers;
 }
 
-// Populate the dropdown shortly after the UI loads; the user can rescan anytime.
 try {
   setTimeout(() => { scanServers(); }, 500);
 } catch (_err) {}
@@ -584,9 +569,7 @@ try {
 // ---------------------------------------------------------------------------
 // Target-frame enforcement + push events
 // ---------------------------------------------------------------------------
-// pluginTargetFrameIds is kept in sync with the server's targetFrameIds via the
-// sync_target_frames command. When non-empty, every node-scoped mutation is
-// rejected unless the node (or one of its ancestors) is inside a target frame.
+
 let pluginTargetFrameIds = new Set();
 const activeEventSubscriptions = new Set();
 
@@ -651,6 +634,57 @@ async function setGridStyleId(node, styleId) {
   if (!node) return;
   if (typeof node.setGridStyleIdAsync === "function") { await node.setGridStyleIdAsync(styleId); return; }
   if ("gridStyleId" in node) node.gridStyleId = styleId;
+}
+
+async function setNodeReactions(node, reactions) {
+  if (!node) return;
+  try {
+    if (typeof node.setReactionsAsync === "function") {
+      await node.setReactionsAsync(reactions);
+      return;
+    }
+    if ("reactions" in node) node.reactions = reactions;
+  } catch (err) {
+    throw describeNodeNavigationRejection(err, reactions);
+  }
+}
+
+const NODE_NAVIGATION_TARGET_RULES =
+  "Figma rejected the prototype destination. A NODE navigation destination must be a valid target for its navigation type: " +
+  "NAVIGATE/SWAP need a top-level frame on a page (not a nested child), " +
+  "OVERLAY needs a frame configured as an overlay, " +
+  "SCROLL_TO needs a node inside a scrollable ancestor of the source, " +
+  "and CHANGE_TO needs a sibling variant within the same component set as the source.";
+
+function describeNodeNavigationRejection(err, reactions) {
+  const message = String((err && err.message) || err);
+  if (!/reaction at index/i.test(message)) return err;
+  const hasNode = ensureArray(reactions).some((r) => containsNodeNavigationAction(r));
+  if (!hasNode) return err;
+  return new Error(message + " — " + NODE_NAVIGATION_TARGET_RULES);
+}
+
+function actionContainsNodeNavigation(a) {
+  if (!a) return false;
+  if (a.type === "NODE") return true;
+  if (a.type === "CONDITIONAL" && Array.isArray(a.conditionalBlocks)) {
+    for (const block of a.conditionalBlocks) {
+      if (!block || !Array.isArray(block.actions)) continue;
+      for (const inner of block.actions) {
+        if (actionContainsNodeNavigation(inner)) return true;
+      }
+    }
+  }
+  return false;
+}
+
+function containsNodeNavigationAction(reaction) {
+  if (!reaction) return false;
+  const actions = Array.isArray(reaction.actions) ? reaction.actions : (reaction.action ? [reaction.action] : []);
+  for (const a of actions) {
+    if (actionContainsNodeNavigation(a)) return true;
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -958,7 +992,6 @@ async function getNodeByIdAsync(id) {
   return node;
 }
 
-
 async function resolveCreateHost(params) {
   const p = params && typeof params === "object" ? params : {};
   const parentNodeId = p.parentNodeId ? String(p.parentNodeId) : null;
@@ -1165,21 +1198,42 @@ async function resolveComponentNodeForSlot(params) {
   throw new Error("Node is not a COMPONENT or COMPONENT_SET");
 }
 
+function componentPropertyOwnerOf(node) {
+  if (!node) return null;
+  if (node.type === "COMPONENT_SET") return node;
+  if (node.type !== "COMPONENT") return null;
+  if (node.parent && node.parent.type === "COMPONENT_SET") return node.parent;
+  return node;
+}
+
+function readComponentPropertyDefinitions(node) {
+  const owner = componentPropertyOwnerOf(node);
+  if (!owner) return {};
+  try {
+    return owner.componentPropertyDefinitions || {};
+  } catch (_err) {
+    return {};
+  }
+}
+
 async function resolvePropertyOwnerForBinding(node, propertyName, preferredOwnerId) {
   if (preferredOwnerId) {
     const explicit = await resolveComponentAuthoringNode({ propertyOwnerId: preferredOwnerId }, { allowComponent: true, allowSet: true });
-    const defs = explicit.componentPropertyDefinitions || {};
+    const owner = componentPropertyOwnerOf(explicit) || explicit;
+    const defs = readComponentPropertyDefinitions(owner);
     if (!Object.prototype.hasOwnProperty.call(defs, propertyName)) {
       throw new Error("Component property not found on propertyOwnerId: " + propertyName);
     }
-    return explicit;
+    return owner;
   }
   const ancestors = getAncestorChain(node);
+  const seen = new Set();
   for (let i = 0; i < ancestors.length; i += 1) {
-    const current = ancestors[i];
-    if (!current || (current.type !== "COMPONENT" && current.type !== "COMPONENT_SET")) continue;
-    const defs = current.componentPropertyDefinitions || {};
-    if (Object.prototype.hasOwnProperty.call(defs, propertyName)) return current;
+    const owner = componentPropertyOwnerOf(ancestors[i]);
+    if (!owner || seen.has(owner.id)) continue;
+    seen.add(owner.id);
+    const defs = readComponentPropertyDefinitions(owner);
+    if (Object.prototype.hasOwnProperty.call(defs, propertyName)) return owner;
   }
   throw new Error("Component property not found in the node ancestry: " + propertyName);
 }
@@ -1188,23 +1242,12 @@ async function resolvePropertyOwnerForBinding(node, propertyName, preferredOwner
 // Node filtering for export
 // ---------------------------------------------------------------------------
 
-// Figma's JSON_REST_V1 export returns hundreds of fields per node (constraints,
-// reactions, effects, guides, blendMode, exportSettings, prototype interactions,
-// absoluteRenderBounds, etc). filterFigmaNode builds a fresh object and copies
-// over only the named fields below, so anything not explicitly listed here
-// (constraints, reactions, effects, guides included) is dropped by construction
-// rather than requiring an explicit delete.
-
 function roundNum(n, decimals) {
   if (typeof n !== "number" || !isFinite(n)) return n;
   const factor = Math.pow(10, decimals === undefined ? 2 : decimals);
   return Math.round(n * factor) / factor;
 }
 
-// Trims a REST-exported componentPropertyDefinitions map down to the fields
-// useful for reading a node (type/defaultValue/variantOptions). Full detail
-// including preferredValues and boundVariables is available via the
-// dedicated get_component_property_definitions tool when actually needed.
 function simplifyComponentPropertyDefinitionsForRead(definitions) {
   const out = {};
   const defs = definitions && typeof definitions === "object" ? definitions : {};
@@ -1278,9 +1321,6 @@ function filterFigmaNode(node, options, depth) {
   }
   if (node.variantProperties !== undefined) filtered.variantProperties = node.variantProperties;
 
-  // A node bound to a shared text style repeats the same 7 fields on every
-  // instance of that style. Emit just the style id instead of expanding it;
-  // callers can resolve the id separately (e.g. via get_styles) if needed.
   if (node.styles && node.styles.text) {
     filtered.textStyleId = node.styles.text;
   } else if (node.style) {
@@ -1376,13 +1416,33 @@ async function readMyDesign(options) {
   return await getNodesInfo(selection.map((n) => n.id), options);
 }
 
+function pageOf(node) {
+  let current = node;
+  while (current && current.type !== "PAGE") current = current.parent;
+  return current || null;
+}
+
+async function focusNodes(nodes) {
+  const list = ensureArray(nodes).filter(Boolean);
+  if (!list.length) throw new Error("No nodes to focus");
+  const page = pageOf(list[0]);
+  if (page && page.id !== figma.currentPage.id) await figma.setCurrentPageAsync(page);
+  const samePage = list.filter((n) => {
+    const p = pageOf(n);
+    return p && p.id === figma.currentPage.id;
+  });
+  if (!samePage.length) throw new Error("Nodes are not on a page and cannot be selected");
+  figma.currentPage.selection = samePage;
+  figma.viewport.scrollAndZoomIntoView(samePage);
+  return { pageId: figma.currentPage.id, pageName: figma.currentPage.name, focused: samePage.length, skipped: list.length - samePage.length };
+}
+
 async function setFocus(params) {
   if (!params || !params.nodeId) throw new Error("Missing nodeId parameter");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
-  figma.currentPage.selection = [node];
-  figma.viewport.scrollAndZoomIntoView([node]);
-  return { success: true, nodeId: node.id };
+  const info = await focusNodes([node]);
+  return { success: true, nodeId: node.id, pageId: info.pageId, pageName: info.pageName };
 }
 
 async function setSelections(params) {
@@ -1391,21 +1451,15 @@ async function setSelections(params) {
   const nodes = await Promise.all(ids.map((id) => figma.getNodeByIdAsync(String(id))));
   const validNodes = nodes.filter((n) => n !== null);
   if (!validNodes.length) throw new Error("No valid nodes found");
-  const currentId = figma.currentPage.id;
-  const currentPageNodes = validNodes.filter((n) => {
-    let cur = n;
-    while (cur && cur.type !== "PAGE") cur = cur.parent;
-    return cur && cur.id === currentId;
-  });
-  if (currentPageNodes.length) {
-    figma.currentPage.selection = currentPageNodes;
-    figma.viewport.scrollAndZoomIntoView(currentPageNodes);
-  }
+
+  const info = await focusNodes(validNodes);
   return {
     success: true,
-    selectionCount: currentPageNodes.length,
-    nodeIds: currentPageNodes.map((n) => n.id),
-    skippedOnOtherPages: validNodes.length - currentPageNodes.length
+    selectionCount: info.focused,
+    nodeIds: figma.currentPage.selection.map((n) => n.id),
+    pageId: info.pageId,
+    pageName: info.pageName,
+    skippedOnOtherPages: info.skipped
   };
 }
 
@@ -1570,6 +1624,31 @@ async function resizeNode(params) {
   if (!("resize" in node)) throw new Error("Node does not support resize");
   node.resize(w, h);
   return { success: true, nodeId: node.id, width: w, height: h };
+}
+
+async function bringToFront(params) {
+  const p = params && typeof params === "object" ? params : {};
+  if (!p.nodeId) throw new Error("Missing nodeId parameter");
+  const node = await figma.getNodeByIdAsync(String(p.nodeId));
+  if (!node) throw new Error("Node not found with ID: " + String(p.nodeId));
+  const parent = node.parent;
+  if (!parent) throw new Error("Node has no parent");
+  if (!("insertChild" in parent)) throw new Error("Parent does not support reordering");
+
+  parent.insertChild(parent.children.length, node);
+  return { success: true, nodeId: node.id, nodeIndex: parent.children.length - 1 };
+}
+
+async function sendToBack(params) {
+  const p = params && typeof params === "object" ? params : {};
+  if (!p.nodeId) throw new Error("Missing nodeId parameter");
+  const node = await figma.getNodeByIdAsync(String(p.nodeId));
+  if (!node) throw new Error("Node not found with ID: " + String(p.nodeId));
+  const parent = node.parent;
+  if (!parent) throw new Error("Node has no parent");
+  if (!("insertChild" in parent)) throw new Error("Parent does not support reordering");
+  parent.insertChild(0, node);
+  return { success: true, nodeId: node.id, nodeIndex: 0 };
 }
 
 async function resizeToFit(params) {
@@ -1749,13 +1828,6 @@ function requiresDeletionConfirmation(node) {
 // ---------------------------------------------------------------------------
 // Checkpoints (best-effort undo)
 // ---------------------------------------------------------------------------
-// Figma's Plugin API has no programmatic undo/redo — only the user's Ctrl+Z
-// stack can undo. These checkpoints are NOT true undo: they snapshot a handful
-// of common mutable properties (position, size, rotation, opacity, visibility,
-// fills, strokes, corner radius, text characters) on still-existing nodes and
-// can reapply them. They cannot restore a deleted node or undo structural
-// changes (reparenting, new children). State lives only for this plugin
-// session and is lost on reload.
 
 const checkpoints = new Map();
 let checkpointSeq = 0;
@@ -1780,7 +1852,6 @@ async function captureNodeSnapshotProps(node) {
     if ("strokeWeight" in node && typeof node.strokeWeight === "number") props.strokeWeight = node.strokeWeight;
     if (node.type === "TEXT" && "characters" in node) props.characters = node.characters;
   } catch (_err) {
-    // Best-effort: skip properties that throw (e.g. mixed values) rather than failing the whole capture.
   }
   return props;
 }
@@ -1862,10 +1933,6 @@ async function listCheckpoints() {
 // ---------------------------------------------------------------------------
 // Undo / Redo (best-effort snapshot stacks)
 // ---------------------------------------------------------------------------
-// Same limits as checkpoints: only snapshot common mutable properties on still-
-// existing nodes. Cannot restore deleted nodes or structural changes. State
-// lives only for this plugin session. Every mutating action in UNDOABLE_ACTIONS
-// is auto-captured by handleAction (before + after) onto the undo stack.
 
 const undoStack = [];
 const redoStack = [];
@@ -2119,9 +2186,6 @@ async function setMultipleTextContents(params) {
 // ---------------------------------------------------------------------------
 // find_nodes — server-side predicate query
 // ---------------------------------------------------------------------------
-// Answers "which nodes match X" inside the plugin so the agent gets back only
-// the matching rows, instead of pulling a whole subtree into context and
-// filtering there. Every predicate is optional; supplying several ANDs them.
 
 function globToRegExp(pattern, matchCase) {
   const escaped = String(pattern).replace(/[.+^${}()|[\]\\]/g, "\\$&");
@@ -2129,7 +2193,6 @@ function globToRegExp(pattern, matchCase) {
   return new RegExp("^" + expanded + "$", matchCase ? "" : "i");
 }
 
-// Nodes carry paints on `fills`, which is figma.mixed when children differ.
 function nodeFillHexes(node) {
   const fills = node.fills;
   if (!fills || fills === figma.mixed || !Array.isArray(fills)) return [];
@@ -2197,11 +2260,6 @@ async function findNodes(params) {
     pages.push(figma.currentPage);
   }
 
-  // matchCount is the true number of matches across the whole search scope;
-  // `items` only ever holds the entries inside [offset, offset+limit), so a
-  // large result doesn't force building a huge array. total/truncated must
-  // reflect matchCount, not items.length, or paging silently lies about how
-  // much more data exists past the current page.
   const items = [];
   let matchCount = 0;
   let scanned = 0;
@@ -2242,8 +2300,6 @@ async function findNodes(params) {
       if (fillStyleId && String(node.fillStyleId || "") !== fillStyleId) continue;
       if (textStyleId && String(node.textStyleId || "") !== textStyleId) continue;
 
-      // A hardcoded paint with no style and no bound variable is the classic
-      // design-system offender, so make it directly queryable.
       if (missingStyle !== null) {
         const hasPaint = nodeFillHexes(node).length > 0;
         const styled = Boolean(node.fillStyleId) || boundVariableIdsOf(node).length > 0;
@@ -2513,8 +2569,10 @@ async function setLayoutMode(params) {
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
   if (!("layoutMode" in node)) throw new Error("Node does not support auto layout");
-  node.layoutMode = String(params.layoutMode || "NONE");
-  if (params.layoutWrap !== undefined && "layoutWrap" in node) node.layoutWrap = String(params.layoutWrap);
+  const mode = String(params.layoutMode || "NONE").toUpperCase();
+  if (!LAYOUT_MODES.has(mode)) throw new Error("Unsupported layoutMode: " + mode + " (expected NONE, HORIZONTAL, VERTICAL, or GRID)");
+  node.layoutMode = mode;
+  if (params.layoutWrap !== undefined && "layoutWrap" in node) node.layoutWrap = String(params.layoutWrap).toUpperCase();
   return { success: true, nodeId: node.id, layoutMode: node.layoutMode };
 }
 
@@ -2535,9 +2593,21 @@ async function setAxisAlign(params) {
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
   if (!("primaryAxisAlignItems" in node)) throw new Error("Node does not support auto layout alignment");
-  if (params.primaryAxisAlignItems !== undefined) node.primaryAxisAlignItems = String(params.primaryAxisAlignItems);
-  if (params.counterAxisAlignItems !== undefined) node.counterAxisAlignItems = String(params.counterAxisAlignItems);
-  return { success: true, nodeId: node.id };
+  if (params.primaryAxisAlignItems !== undefined && params.primaryAxisAlignItems !== null) {
+    const value = String(params.primaryAxisAlignItems).toUpperCase();
+    if (!PRIMARY_AXIS_ALIGN.has(value)) {
+      throw new Error("Unsupported primaryAxisAlignItems: " + value + " (expected MIN, CENTER, MAX, SPACE_BETWEEN, SPACE_AROUND, or SPACE_EVENLY)");
+    }
+    node.primaryAxisAlignItems = value;
+  }
+  if (params.counterAxisAlignItems !== undefined && params.counterAxisAlignItems !== null) {
+    const value = String(params.counterAxisAlignItems).toUpperCase();
+    if (!COUNTER_AXIS_ALIGN.has(value)) {
+      throw new Error("Unsupported counterAxisAlignItems: " + value + " (expected MIN, CENTER, MAX, or BASELINE)");
+    }
+    node.counterAxisAlignItems = value;
+  }
+  return { success: true, nodeId: node.id, primaryAxisAlignItems: node.primaryAxisAlignItems, counterAxisAlignItems: node.counterAxisAlignItems };
 }
 
 async function setLayoutSizing(params) {
@@ -2560,12 +2630,52 @@ async function setItemSpacing(params) {
   return { success: true, nodeId: node.id, itemSpacing: node.itemSpacing };
 }
 
+const LAYOUT_GRID_ALIGNMENTS = new Set(["MIN", "MAX", "STRETCH", "CENTER"]);
+
+function normalizeLayoutGrid(g) {
+  if (!g || typeof g !== "object") throw new Error("Each layout grid must be an object");
+  const pattern = g.pattern === undefined || g.pattern === null ? "" : String(g.pattern).toUpperCase();
+
+  if (pattern === "GRID") {
+    const out = { pattern, sectionSize: numOr(g.sectionSize, 8) };
+    if (g.visible !== undefined && g.visible !== null) out.visible = Boolean(g.visible);
+    if (g.color !== undefined && g.color !== null) out.color = normalizeColorParts(g.color);
+    return out;
+  }
+
+  if (pattern === "ROWS" || pattern === "COLUMNS") {
+    const alignment = g.alignment === undefined || g.alignment === null ? "STRETCH" : String(g.alignment).toUpperCase();
+    if (!LAYOUT_GRID_ALIGNMENTS.has(alignment)) {
+      throw new Error("Unsupported layout grid alignment: " + alignment + " (expected MIN, MAX, CENTER, or STRETCH)");
+    }
+    const out = {
+      pattern,
+      alignment,
+      gutterSize: numOr(g.gutterSize, 0),
+      count: g.count === undefined || g.count === null ? 1 : Number(g.count)
+    };
+
+    if (alignment !== "STRETCH" && g.sectionSize !== undefined && g.sectionSize !== null) {
+      out.sectionSize = numOr(g.sectionSize, 0);
+    }
+
+    if (alignment !== "CENTER" && g.offset !== undefined && g.offset !== null) {
+      out.offset = numOr(g.offset, 0);
+    }
+    if (g.visible !== undefined && g.visible !== null) out.visible = Boolean(g.visible);
+    if (g.color !== undefined && g.color !== null) out.color = normalizeColorParts(g.color);
+    return out;
+  }
+
+  throw new Error("Unsupported layout grid pattern: " + pattern + " (expected ROWS, COLUMNS, or GRID)");
+}
+
 async function setLayoutGrids(params) {
   if (!params || !params.frameId) throw new Error("Missing frameId");
   const node = await figma.getNodeByIdAsync(String(params.frameId));
   if (!node) throw new Error("Node not found with ID: " + String(params.frameId));
   if (!("layoutGrids" in node)) throw new Error("Node does not support layoutGrids");
-  const layoutGrids = ensureArray(params.layoutGrids);
+  const layoutGrids = ensureArray(params.layoutGrids).map((g) => normalizeLayoutGrid(g));
   node.layoutGrids = layoutGrids;
   return { success: true, frameId: node.id, layoutGridsCount: node.layoutGrids.length };
 }
@@ -2603,6 +2713,202 @@ async function setFixedChildren(params) {
 }
 
 // ---------------------------------------------------------------------------
+// Grid layout (layoutMode "GRID")
+// ---------------------------------------------------------------------------
+
+const LAYOUT_MODES = new Set(["NONE", "HORIZONTAL", "VERTICAL", "GRID"]);
+const PRIMARY_AXIS_ALIGN = new Set(["MIN", "CENTER", "MAX", "SPACE_BETWEEN", "SPACE_AROUND", "SPACE_EVENLY"]);
+const COUNTER_AXIS_ALIGN = new Set(["MIN", "CENTER", "MAX", "BASELINE"]);
+const TEXT_WRAP_STYLES = new Set(["AUTO", "BALANCE", "PRETTY"]);
+
+const GRID_TRACK_TYPES = new Set(["FLEX", "FIXED", "HUG"]);
+const GRID_AUTO_TRACKS = new Set(["NONE", "ROWS"]);
+const GRID_ITEMS_POSITIONING = new Set(["MANUAL", "ROW_AUTO_FLOW"]);
+const GRID_CHILD_ALIGN = new Set(["MIN", "CENTER", "MAX", "AUTO"]);
+
+function applyGridTrackSizes(tracks, specs, label) {
+  const list = ensureArray(specs);
+  for (let i = 0; i < list.length; i += 1) {
+    const spec = list[i];
+    if (spec === undefined || spec === null) continue;
+    if (i >= tracks.length) throw new Error(label + " index " + i + " is out of range (only " + tracks.length + " tracks)");
+    const normalized = typeof spec === "number" ? { type: "FIXED", value: spec } : spec;
+    if (typeof normalized !== "object") throw new Error(label + " entries must be a number or an object");
+    const type = normalized.type === undefined || normalized.type === null ? null : String(normalized.type).toUpperCase();
+    if (type !== null) {
+      if (!GRID_TRACK_TYPES.has(type)) throw new Error("Unsupported grid track type: " + type + " (expected FLEX, FIXED, or HUG)");
+      tracks[i].type = type;
+    }
+    if (normalized.value !== undefined && normalized.value !== null) tracks[i].value = Number(normalized.value);
+  }
+}
+
+function readGridTrackSizes(tracks) {
+  return ensureArray(tracks).map((t) => ({ type: t.type, value: t.value }));
+}
+
+async function setGridLayout(params) {
+  const p = params && typeof params === "object" ? params : {};
+  const id = p.nodeId || p.frameId;
+  if (!id) throw new Error("Missing nodeId");
+  const node = await getNodeByIdAsync(normalizeFigmaNodeId(String(id)));
+  if (!node) throw new Error("Node not found with ID: " + String(id));
+  if (!("layoutMode" in node)) throw new Error("Node does not support auto layout");
+
+  if (node.layoutMode !== "GRID") node.layoutMode = "GRID";
+
+  if (p.rowCount !== undefined && p.rowCount !== null) node.gridRowCount = Math.max(1, Math.floor(Number(p.rowCount)));
+  if (p.columnCount !== undefined && p.columnCount !== null) node.gridColumnCount = Math.max(1, Math.floor(Number(p.columnCount)));
+  if (p.rowGap !== undefined && p.rowGap !== null) node.gridRowGap = Number(p.rowGap);
+  if (p.columnGap !== undefined && p.columnGap !== null) node.gridColumnGap = Number(p.columnGap);
+
+  if (p.gridAutoTracks !== undefined && p.gridAutoTracks !== null) {
+    const value = String(p.gridAutoTracks).toUpperCase();
+    if (!GRID_AUTO_TRACKS.has(value)) throw new Error("Unsupported gridAutoTracks: " + value + " (expected NONE or ROWS)");
+    node.gridAutoTracks = value;
+  }
+  if (p.gridItemsPositioning !== undefined && p.gridItemsPositioning !== null) {
+    const value = String(p.gridItemsPositioning).toUpperCase();
+    if (!GRID_ITEMS_POSITIONING.has(value)) throw new Error("Unsupported gridItemsPositioning: " + value + " (expected MANUAL or ROW_AUTO_FLOW)");
+    node.gridItemsPositioning = value;
+  }
+
+  if (p.rowSizes !== undefined) applyGridTrackSizes(node.gridRowSizes, p.rowSizes, "rowSizes");
+  if (p.columnSizes !== undefined) applyGridTrackSizes(node.gridColumnSizes, p.columnSizes, "columnSizes");
+
+  return {
+    success: true,
+    nodeId: node.id,
+    layoutMode: node.layoutMode,
+    rowCount: node.gridRowCount,
+    columnCount: node.gridColumnCount,
+    rowGap: node.gridRowGap,
+    columnGap: node.gridColumnGap,
+    gridAutoTracks: node.gridAutoTracks,
+    gridItemsPositioning: node.gridItemsPositioning,
+    rowSizes: readGridTrackSizes(node.gridRowSizes),
+    columnSizes: readGridTrackSizes(node.gridColumnSizes)
+  };
+}
+
+async function getGridLayout(params) {
+  const p = params && typeof params === "object" ? params : {};
+  const id = p.nodeId || p.frameId;
+  if (!id) throw new Error("Missing nodeId");
+  const node = await getNodeByIdAsync(normalizeFigmaNodeId(String(id)));
+  if (!node) throw new Error("Node not found with ID: " + String(id));
+  if (!("layoutMode" in node)) throw new Error("Node does not support auto layout");
+  if (node.layoutMode !== "GRID") {
+    return { success: true, nodeId: node.id, layoutMode: node.layoutMode, isGrid: false };
+  }
+  const children = ensureArray(node.children).map((c) => ({
+    nodeId: c.id,
+    name: c.name,
+    row: c.gridRowAnchorIndex,
+    column: c.gridColumnAnchorIndex,
+    rowSpan: c.gridRowSpan,
+    columnSpan: c.gridColumnSpan,
+    horizontalAlign: c.gridChildHorizontalAlign,
+    verticalAlign: c.gridChildVerticalAlign
+  }));
+  return {
+    success: true,
+    nodeId: node.id,
+    layoutMode: node.layoutMode,
+    isGrid: true,
+    rowCount: node.gridRowCount,
+    columnCount: node.gridColumnCount,
+    rowGap: node.gridRowGap,
+    columnGap: node.gridColumnGap,
+    gridAutoTracks: node.gridAutoTracks,
+    gridItemsPositioning: node.gridItemsPositioning,
+    rowSizes: readGridTrackSizes(node.gridRowSizes),
+    columnSizes: readGridTrackSizes(node.gridColumnSizes),
+    children
+  };
+}
+
+async function setGridChildPosition(params) {
+  const p = params && typeof params === "object" ? params : {};
+  if (!p.nodeId) throw new Error("Missing nodeId");
+  const node = await getNodeByIdAsync(normalizeFigmaNodeId(String(p.nodeId)));
+  if (!node) throw new Error("Node not found with ID: " + String(p.nodeId));
+  const parent = node.parent;
+  if (!parent || parent.layoutMode !== "GRID") throw new Error("Node's parent is not a GRID auto-layout frame");
+
+  if (p.row !== undefined && p.row !== null && p.column !== undefined && p.column !== null) {
+    node.setGridChildPosition(Math.max(0, Math.floor(Number(p.row))), Math.max(0, Math.floor(Number(p.column))));
+  } else if ((p.row !== undefined && p.row !== null) || (p.column !== undefined && p.column !== null)) {
+    const row = p.row !== undefined && p.row !== null ? Math.floor(Number(p.row)) : node.gridRowAnchorIndex;
+    const column = p.column !== undefined && p.column !== null ? Math.floor(Number(p.column)) : node.gridColumnAnchorIndex;
+    node.setGridChildPosition(Math.max(0, row), Math.max(0, column));
+  }
+
+  if (p.rowSpan !== undefined && p.rowSpan !== null) {
+    const span = Math.max(1, Math.floor(Number(p.rowSpan)));
+    if (node.gridRowAnchorIndex + span > parent.gridRowCount) {
+      throw new Error("rowSpan " + span + " from row " + node.gridRowAnchorIndex + " exceeds the grid's " + parent.gridRowCount + " rows");
+    }
+    node.gridRowSpan = span;
+  }
+  if (p.columnSpan !== undefined && p.columnSpan !== null) {
+    const span = Math.max(1, Math.floor(Number(p.columnSpan)));
+    if (node.gridColumnAnchorIndex + span > parent.gridColumnCount) {
+      throw new Error("columnSpan " + span + " from column " + node.gridColumnAnchorIndex + " exceeds the grid's " + parent.gridColumnCount + " columns");
+    }
+    node.gridColumnSpan = span;
+  }
+  if (p.horizontalAlign !== undefined && p.horizontalAlign !== null) {
+    const value = String(p.horizontalAlign).toUpperCase();
+    if (!GRID_CHILD_ALIGN.has(value)) throw new Error("Unsupported horizontalAlign: " + value + " (expected MIN, CENTER, MAX, or AUTO)");
+    node.gridChildHorizontalAlign = value;
+  }
+  if (p.verticalAlign !== undefined && p.verticalAlign !== null) {
+    const value = String(p.verticalAlign).toUpperCase();
+    if (!GRID_CHILD_ALIGN.has(value)) throw new Error("Unsupported verticalAlign: " + value + " (expected MIN, CENTER, MAX, or AUTO)");
+    node.gridChildVerticalAlign = value;
+  }
+
+  return {
+    success: true,
+    nodeId: node.id,
+    row: node.gridRowAnchorIndex,
+    column: node.gridColumnAnchorIndex,
+    rowSpan: node.gridRowSpan,
+    columnSpan: node.gridColumnSpan,
+    horizontalAlign: node.gridChildHorizontalAlign,
+    verticalAlign: node.gridChildVerticalAlign
+  };
+}
+
+async function reorderGridTracks(params) {
+  const p = params && typeof params === "object" ? params : {};
+  const id = p.nodeId || p.frameId;
+  if (!id) throw new Error("Missing nodeId");
+  const node = await getNodeByIdAsync(normalizeFigmaNodeId(String(id)));
+  if (!node) throw new Error("Node not found with ID: " + String(id));
+  if (node.layoutMode !== "GRID") throw new Error("Node is not a GRID auto-layout frame");
+  const axis = String(p.axis || "").toUpperCase();
+  if (axis !== "ROWS" && axis !== "COLUMNS") throw new Error("axis must be ROWS or COLUMNS");
+  const fromIndices = ensureArray(p.fromIndices).map((n) => Math.max(0, Math.floor(Number(n))));
+  if (!fromIndices.length) throw new Error("Missing fromIndices");
+  if (p.insertionIndex === undefined || p.insertionIndex === null) throw new Error("Missing insertionIndex");
+  const insertionIndex = Math.max(0, Math.floor(Number(p.insertionIndex)));
+
+  if (axis === "ROWS") node.reorderRows({ fromIndices, insertionIndex });
+  else node.reorderColumns({ fromIndices, insertionIndex });
+  return {
+    success: true,
+    nodeId: node.id,
+    axis,
+    fromIndices,
+    insertionIndex,
+    rowSizes: readGridTrackSizes(node.gridRowSizes),
+    columnSizes: readGridTrackSizes(node.gridColumnSizes)
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Components
 // ---------------------------------------------------------------------------
 
@@ -2612,10 +2918,6 @@ async function getLocalComponents(params) {
   const includeProperties = params && params.includeProperties !== undefined ? Boolean(params.includeProperties) : false;
   const nodes = figma.root.findAll((n) => {
     if (n.type === "COMPONENT") {
-      // A variant component is a child of a COMPONENT_SET. Reading
-      // componentPropertyDefinitions on a variant throws in the Plugin API,
-      // and variants are already represented by their parent COMPONENT_SET,
-      // so skip them here.
       if (n.parent && n.parent.type === "COMPONENT_SET") return false;
       return true;
     }
@@ -2623,16 +2925,8 @@ async function getLocalComponents(params) {
     return false;
   });
   const entries = nodes.map((n) => {
-    let defs = {};
-    if (includeProperties) {
-      try {
-        defs = n.componentPropertyDefinitions
-          ? simplifyComponentPropertyDefinitionsForRead(n.componentPropertyDefinitions)
-          : {};
-      } catch {
-        defs = {};
-      }
-    }
+    const rawDefs = readComponentPropertyDefinitions(n);
+    const defs = includeProperties ? simplifyComponentPropertyDefinitionsForRead(rawDefs) : {};
     const entry = {
       id: n.id,
       name: n.name,
@@ -2643,9 +2937,7 @@ async function getLocalComponents(params) {
     if (includeProperties) {
       entry.componentPropertyDefinitions = Object.keys(defs).length ? defs : null;
     } else {
-      entry.propertyCount = n.componentPropertyDefinitions
-        ? Object.keys(n.componentPropertyDefinitions).length
-        : 0;
+      entry.propertyCount = Object.keys(rawDefs).length;
     }
     return entry;
   });
@@ -2729,7 +3021,7 @@ async function combineAsVariantsAction(params) {
     name: componentSet.name,
     type: componentSet.type,
     componentIds: componentSet.children.map((child) => child.id),
-    componentPropertyDefinitions: serializeComponentPropertyDefinitions(componentSet.componentPropertyDefinitions)
+    componentPropertyDefinitions: serializeComponentPropertyDefinitions(readComponentPropertyDefinitions(componentSet))
   };
 }
 
@@ -2761,7 +3053,7 @@ async function getComponentPropertyDefinitionsAction(params) {
     name: owner.name,
     type: owner.type,
     componentSetId: owner.type === "COMPONENT" && owner.parent && owner.parent.type === "COMPONENT_SET" ? owner.parent.id : owner.type === "COMPONENT_SET" ? owner.id : null,
-    componentPropertyDefinitions: serializeComponentPropertyDefinitions(owner.componentPropertyDefinitions)
+    componentPropertyDefinitions: serializeComponentPropertyDefinitions(readComponentPropertyDefinitions(owner))
   };
 }
 
@@ -2792,7 +3084,7 @@ async function addComponentPropertyAction(params) {
     success: true,
     nodeId: owner.id,
     propertyName: resolvedPropertyName,
-    componentPropertyDefinitions: serializeComponentPropertyDefinitions(owner.componentPropertyDefinitions)
+    componentPropertyDefinitions: serializeComponentPropertyDefinitions(readComponentPropertyDefinitions(owner))
   };
 }
 
@@ -2805,7 +3097,7 @@ async function editComponentPropertyAction(params) {
     allowSet: true,
     preferSet: p.preferComponentSet !== false
   });
-  const definitions = owner.componentPropertyDefinitions || {};
+  const definitions = readComponentPropertyDefinitions(owner);
   const current = definitions[propertyName];
   if (!current) throw new Error("Component property not found: " + propertyName);
   const updates = p.updates && typeof p.updates === "object" ? Object.assign({}, p.updates) : {};
@@ -2820,7 +3112,7 @@ async function editComponentPropertyAction(params) {
     success: true,
     nodeId: owner.id,
     propertyName: nextPropertyName,
-    componentPropertyDefinitions: serializeComponentPropertyDefinitions(owner.componentPropertyDefinitions)
+    componentPropertyDefinitions: serializeComponentPropertyDefinitions(readComponentPropertyDefinitions(owner))
   };
 }
 
@@ -2838,7 +3130,7 @@ async function deleteComponentPropertyAction(params) {
     success: true,
     nodeId: owner.id,
     propertyName,
-    componentPropertyDefinitions: serializeComponentPropertyDefinitions(owner.componentPropertyDefinitions)
+    componentPropertyDefinitions: serializeComponentPropertyDefinitions(readComponentPropertyDefinitions(owner))
   };
 }
 
@@ -2861,7 +3153,7 @@ async function bindComponentPropertyAction(params) {
   const propertyName = p.propertyName === undefined || p.propertyName === null ? "" : String(p.propertyName);
   if (!propertyName) throw new Error("Missing propertyName");
   const owner = await resolvePropertyOwnerForBinding(node, propertyName, p.propertyOwnerId);
-  const def = owner.componentPropertyDefinitions[propertyName];
+  const def = readComponentPropertyDefinitions(owner)[propertyName];
   if (!def) throw new Error("Component property not found: " + propertyName);
   const type = String(def.type);
   if (type === "BOOLEAN" && field !== "visible") throw new Error("BOOLEAN properties can only bind to visible");
@@ -2892,7 +3184,7 @@ async function bindComponentPropertyAction(params) {
 async function createComponentSlotAction(params) {
   const p = params && typeof params === "object" ? params : {};
   const component = await resolveComponentNodeForSlot(p);
-  const before = new Set(Object.keys(component.componentPropertyDefinitions || {}));
+  const before = new Set(Object.keys(readComponentPropertyDefinitions(component)));
   const slot = component.createSlot();
   if (p.name !== undefined && p.name !== null) slot.name = String(p.name);
   if (p.width !== undefined && p.height !== undefined && "resize" in slot) {
@@ -2900,7 +3192,7 @@ async function createComponentSlotAction(params) {
   }
   if (p.x !== undefined) slot.x = Number(p.x);
   if (p.y !== undefined) slot.y = Number(p.y);
-  const defs = component.componentPropertyDefinitions || {};
+  const defs = readComponentPropertyDefinitions(component);
   let propertyName = null;
   for (const key of Object.keys(defs)) {
     if (before.has(key)) continue;
@@ -2914,7 +3206,7 @@ async function createComponentSlotAction(params) {
     componentId: component.id,
     slotNodeId: slot.id,
     propertyName,
-    componentPropertyDefinitions: serializeComponentPropertyDefinitions(component.componentPropertyDefinitions)
+    componentPropertyDefinitions: serializeComponentPropertyDefinitions(readComponentPropertyDefinitions(component))
   };
 }
 
@@ -2960,7 +3252,7 @@ async function editComponentSlotAction(params) {
     slotNodeId: slot.id,
     name: slot.name,
     componentId: owner.id,
-    componentPropertyDefinitions: serializeComponentPropertyDefinitions(owner.componentPropertyDefinitions)
+    componentPropertyDefinitions: serializeComponentPropertyDefinitions(readComponentPropertyDefinitions(owner))
   };
 }
 
@@ -2969,9 +3261,9 @@ async function deleteComponentSlotAction(params) {
   const slot = await resolveSlotNode(p);
   const owner = await findOwningComponentForSlot(slot);
   const slotNodeId = slot.id;
-  const before = serializeComponentPropertyDefinitions(owner.componentPropertyDefinitions);
+  const before = serializeComponentPropertyDefinitions(readComponentPropertyDefinitions(owner));
   slot.remove();
-  let after = serializeComponentPropertyDefinitions(owner.componentPropertyDefinitions);
+  let after = serializeComponentPropertyDefinitions(readComponentPropertyDefinitions(owner));
   let removedPropertyName = null;
   for (const key of Object.keys(before)) {
     if (before[key] && before[key].type === "SLOT" && !(key in after)) {
@@ -2980,8 +3272,6 @@ async function deleteComponentSlotAction(params) {
     }
   }
   if (!removedPropertyName) {
-    // Figma normally removes the SLOT property automatically when its node is removed.
-    // As a fallback, clean up any orphaned SLOT property left pointing at no remaining slot node.
     const remainingSlotNames = new Set(walkForSlotNodes(owner).map((n) => n.name));
     for (const key of Object.keys(after)) {
       if (!after[key] || after[key].type !== "SLOT") continue;
@@ -2989,7 +3279,7 @@ async function deleteComponentSlotAction(params) {
       if (!remainingSlotNames.has(baseName)) {
         owner.deleteComponentProperty(key);
         removedPropertyName = key;
-        after = serializeComponentPropertyDefinitions(owner.componentPropertyDefinitions);
+        after = serializeComponentPropertyDefinitions(readComponentPropertyDefinitions(owner));
         break;
       }
     }
@@ -3284,10 +3574,23 @@ async function setAnnotation(params) {
   if (!params || !params.nodeId) throw new Error("Missing nodeId");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
-  const labelMarkdown = params.labelMarkdown === undefined || params.labelMarkdown === null ? "" : String(params.labelMarkdown);
-  const categoryId = params.categoryId ? String(params.categoryId) : undefined;
-  const properties = ensureArray(params.properties);
-  node.annotations = [{ labelMarkdown, categoryId, properties }];
+  if (!("annotations" in node)) throw new Error("Node does not support annotations");
+
+  const annotation = {};
+  if (params.labelMarkdown !== undefined && params.labelMarkdown !== null) {
+    annotation.labelMarkdown = String(params.labelMarkdown);
+  } else if (params.label !== undefined && params.label !== null) {
+    annotation.label = String(params.label);
+  } else {
+    annotation.labelMarkdown = "";
+  }
+  if (params.categoryId) annotation.categoryId = String(params.categoryId);
+  const properties = ensureArray(params.properties)
+    .map((p) => (typeof p === "string" ? { type: p } : p))
+    .filter((p) => p && typeof p === "object" && p.type)
+    .map((p) => ({ type: String(p.type) }));
+  if (properties.length) annotation.properties = properties;
+  node.annotations = [annotation];
   return { success: true, nodeId: node.id, annotationsCount: node.annotations.length };
 }
 
@@ -3413,13 +3716,19 @@ function buildTransitionFromParams(params, fallbackPresetName) {
   return normalizeTransition(merged);
 }
 
+const NODE_NAVIGATION_TYPES = new Set(["NAVIGATE", "SWAP", "OVERLAY", "SCROLL_TO", "CHANGE_TO"]);
+
 function buildNodeActionFromParams(params) {
   const destinationId = params && params.destinationId ? String(params.destinationId) : "";
   if (!destinationId) throw new Error("Missing destinationId");
+  const navigation = params && params.navigation ? String(params.navigation).toUpperCase() : "NAVIGATE";
+  if (!NODE_NAVIGATION_TYPES.has(navigation)) {
+    throw new Error("Unsupported navigation: " + navigation + " (expected NAVIGATE, SWAP, OVERLAY, SCROLL_TO, or CHANGE_TO)");
+  }
   const action = {
     type: "NODE",
     destinationId,
-    navigation: params && params.navigation ? String(params.navigation) : "NAVIGATE",
+    navigation,
     transition: buildTransitionFromParams(params)
   };
   if (params && params.preserveScrollPosition !== undefined) action.preserveScrollPosition = Boolean(params.preserveScrollPosition);
@@ -3427,22 +3736,21 @@ function buildNodeActionFromParams(params) {
   if (params && params.resetScrollPosition !== undefined) action.resetScrollPosition = Boolean(params.resetScrollPosition);
   if (params && params.resetInteractiveComponents !== undefined) action.resetInteractiveComponents = Boolean(params.resetInteractiveComponents);
   if (params && params.overlayRelativePosition && typeof params.overlayRelativePosition === "object") {
-    action.overlayRelativePosition = {
-      x: Number(params.overlayRelativePosition.x),
-      y: Number(params.overlayRelativePosition.y)
-    };
+    action.overlayRelativePosition = normalizeVector(params.overlayRelativePosition, 0, 0);
   }
   return action;
 }
 
 function buildMotionReaction(params, fallbackPresetName) {
-  const triggerType = params && params.triggerType ? String(params.triggerType) : "ON_CLICK";
-  const reactionParams = Object.assign({}, params);
-  if (fallbackPresetName && !reactionParams.preset) reactionParams.preset = fallbackPresetName;
-  return {
-    trigger: { type: triggerType },
-    actions: [buildNodeActionFromParams(reactionParams)]
-  };
+  const trigger = params && params.trigger && typeof params.trigger === "object"
+    ? normalizeReactionTrigger(params.trigger)
+    : { type: params && params.triggerType ? String(params.triggerType) : "ON_CLICK" };
+  const action = buildNodeActionFromParams(
+    fallbackPresetName && !(params && params.transition) && !(params && params.preset)
+      ? Object.assign({}, params, { preset: fallbackPresetName })
+      : params
+  );
+  return normalizeReaction({ trigger, actions: [action] });
 }
 
 function firstReactionAction(r) {
@@ -3463,23 +3771,37 @@ function normalizeReactionAction(a) {
   if (!a || typeof a !== "object") throw new Error("Reaction action must be an object");
   const type = a.type === undefined || a.type === null ? "" : String(a.type);
   if (!type) throw new Error("Reaction action missing type");
+  if (type === "NODE") {
+    return buildNodeActionFromParams({
+      destinationId: a.destinationId,
+      navigation: a.navigation,
+      transition: a.transition === null ? { type: "SMART_ANIMATE", duration: 0, easing: { type: "LINEAR" } } : a.transition,
+      preserveScrollPosition: a.preserveScrollPosition,
+      resetVideoPosition: a.resetVideoPosition,
+      resetScrollPosition: a.resetScrollPosition,
+      resetInteractiveComponents: a.resetInteractiveComponents,
+      overlayRelativePosition: a.overlayRelativePosition
+    });
+  }
   const out = Object.assign({}, a, { type });
   if (type === "URL") { const url = out.url === undefined || out.url === null ? "" : String(out.url); if (!url) throw new Error("URL action missing url"); out.url = url; }
-  if (type === "NODE") {
-    const destinationId = out.destinationId === undefined || out.destinationId === null ? "" : String(out.destinationId);
-    if (!destinationId) throw new Error("NODE action missing destinationId");
-    out.destinationId = destinationId;
-    if (out.navigation !== undefined && out.navigation !== null) out.navigation = String(out.navigation);
-    if (out.transition !== undefined && out.transition !== null) out.transition = normalizeTransition(out.transition);
-    if (out.overlayRelativePosition !== undefined && out.overlayRelativePosition !== null) {
-      const pos = out.overlayRelativePosition;
-      if (!pos || typeof pos !== "object") throw new Error("NODE action overlayRelativePosition must be an object");
-      out.overlayRelativePosition = { x: Number(pos.x), y: Number(pos.y) };
+  if (type === "CONDITIONAL") {
+    if (!Array.isArray(out.conditionalBlocks)) out.conditionalBlocks = [];
+    const newBlocks = [];
+    for (const block of out.conditionalBlocks) {
+      if (!block || typeof block !== "object") continue;
+      const rawInner = Array.isArray(block.actions) ? block.actions : [];
+      const inner = [];
+      for (const act of rawInner) {
+        const n = normalizeReactionAction(act);
+        if (n) inner.push(n);
+      }
+      if (!inner.length) continue;
+      const nb = Object.assign({}, block, { actions: inner });
+      if (block.condition !== undefined && block.condition !== null) nb.condition = block.condition;
+      newBlocks.push(nb);
     }
-    if (out.preserveScrollPosition !== undefined) out.preserveScrollPosition = Boolean(out.preserveScrollPosition);
-    if (out.resetVideoPosition !== undefined) out.resetVideoPosition = Boolean(out.resetVideoPosition);
-    if (out.resetScrollPosition !== undefined) out.resetScrollPosition = Boolean(out.resetScrollPosition);
-    if (out.resetInteractiveComponents !== undefined) out.resetInteractiveComponents = Boolean(out.resetInteractiveComponents);
+    out.conditionalBlocks = newBlocks;
   }
   if (type === "SET_VARIABLE") {
     const variableId = out.variableId === undefined || out.variableId === null ? "" : String(out.variableId);
@@ -3489,11 +3811,29 @@ function normalizeReactionAction(a) {
   }
   if (type === "SET_VARIABLE_MODE") {
     const variableCollectionId = out.variableCollectionId === undefined || out.variableCollectionId === null ? "" : String(out.variableCollectionId);
-    const modeId = out.modeId === undefined || out.modeId === null ? "" : String(out.modeId);
+    const rawModeId = out.variableModeId !== undefined && out.variableModeId !== null
+      ? out.variableModeId
+      : (out.modeId !== undefined && out.modeId !== null ? out.modeId : "");
+    const variableModeId = String(rawModeId);
     if (!variableCollectionId) throw new Error("SET_VARIABLE_MODE action missing variableCollectionId");
-    if (!modeId) throw new Error("SET_VARIABLE_MODE action missing modeId");
+    if (!variableModeId) throw new Error("SET_VARIABLE_MODE action missing variableModeId");
     out.variableCollectionId = variableCollectionId;
-    out.modeId = modeId;
+    out.variableModeId = variableModeId;
+    delete out.modeId;
+  }
+  if (type === "UPDATE_MEDIA_RUNTIME") {
+    if (out.destinationId !== undefined && out.destinationId !== null) out.destinationId = String(out.destinationId);
+    const mediaAction = out.mediaAction === undefined || out.mediaAction === null ? "" : String(out.mediaAction);
+    if (!mediaAction) throw new Error("UPDATE_MEDIA_RUNTIME action missing mediaAction");
+    out.mediaAction = mediaAction;
+    if (mediaAction === "SKIP_FORWARD" || mediaAction === "SKIP_BACKWARD") {
+      if (!Object.prototype.hasOwnProperty.call(out, "amountToSkip")) throw new Error("UPDATE_MEDIA_RUNTIME " + mediaAction + " requires amountToSkip");
+      out.amountToSkip = Number(out.amountToSkip);
+    }
+    if (mediaAction === "SKIP_TO") {
+      if (!Object.prototype.hasOwnProperty.call(out, "newTimestamp")) throw new Error("UPDATE_MEDIA_RUNTIME SKIP_TO requires newTimestamp");
+      out.newTimestamp = Number(out.newTimestamp);
+    }
   }
   return out;
 }
@@ -3501,15 +3841,16 @@ function normalizeReactionAction(a) {
 function normalizeReaction(r) {
   if (!r || typeof r !== "object") throw new Error("Reaction must be an object");
   const trigger = normalizeReactionTrigger(r.trigger);
-  let actions;
-  if (Array.isArray(r.actions)) {
-    actions = r.actions.map((a) => normalizeReactionAction(a));
-  } else if (r.action !== undefined && r.action !== null) {
-    actions = [normalizeReactionAction(r.action)];
-  } else {
-    throw new Error("Reaction must include action or actions");
+  const rawActions = Array.isArray(r.actions)
+    ? r.actions
+    : (r.action !== undefined && r.action !== null ? [r.action] : null);
+  if (rawActions === null) throw new Error("Reaction must include action or actions");
+  const actions = [];
+  for (const a of rawActions) {
+    const n = normalizeReactionAction(a);
+    if (n) actions.push(n);
   }
-  if (!actions.length) throw new Error("Reaction actions must be non-empty");
+  if (!actions.length) throw new Error("Reaction actions must be non-empty after removing invalid/empty actions");
   const out = { trigger, actions };
   if (actions.length === 1) out.action = actions[0];
   return out;
@@ -3520,9 +3861,14 @@ async function setReactions(params) {
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
   if (!("reactions" in node)) throw new Error("Node does not support reactions");
-  const reactions = ensureArray(params.reactions).map((r) => normalizeReaction(r));
-  node.reactions = reactions;
-  return { success: true, nodeId: node.id, reactionsCount: node.reactions.length };
+  const raw = ensureArray(params.reactions);
+  const normalized = raw.map((r) => normalizeReaction(r));
+  await setNodeReactions(node, normalized);
+  return {
+    success: true,
+    nodeId: node.id,
+    reactionsCount: ensureArray(node.reactions).length
+  };
 }
 
 async function clearReactions(params) {
@@ -3530,7 +3876,7 @@ async function clearReactions(params) {
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
   if (!("reactions" in node)) throw new Error("Node does not support reactions");
-  node.reactions = [];
+  await setNodeReactions(node, []);
   return { success: true, nodeId: node.id, reactionsCount: 0 };
 }
 
@@ -3543,8 +3889,9 @@ async function upsertReaction(params) {
   const triggerType = match.triggerType === undefined || match.triggerType === null ? "" : String(match.triggerType);
   const actionType = match.actionType === undefined || match.actionType === null ? "" : String(match.actionType);
   const destinationId = match.destinationId === undefined || match.destinationId === null ? "" : String(match.destinationId);
-  const next = normalizeReaction(params.reaction);
-  const current = ensureArray(node.reactions);
+  const normalized = normalizeReaction(params.reaction);
+
+  const current = ensureArray(node.reactions).map((r) => normalizeReaction(cloneJsonValue(r)));
   let replaced = false;
   for (let i = 0; i < current.length; i += 1) {
     const r = current[i];
@@ -3553,11 +3900,16 @@ async function upsertReaction(params) {
     if (triggerType && String(r.trigger.type) !== triggerType) continue;
     if (actionType && String(a.type) !== actionType) continue;
     if (destinationId && String(a.destinationId || "") !== destinationId) continue;
-    current[i] = next; replaced = true; break;
+    current[i] = normalized; replaced = true; break;
   }
-  if (!replaced) current.push(next);
-  node.reactions = current;
-  return { success: true, nodeId: node.id, replaced, reactionsCount: node.reactions.length };
+  if (!replaced) current.push(normalized);
+  await setNodeReactions(node, current);
+  return {
+    success: true,
+    nodeId: node.id,
+    replaced,
+    reactionsCount: ensureArray(node.reactions).length
+  };
 }
 
 async function getReactions(params) {
@@ -3597,10 +3949,11 @@ async function setTransitionReaction(params) {
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
   if (!("reactions" in node)) throw new Error("Node does not support reactions");
-  const current = ensureArray(node.reactions);
+
+  const current = ensureArray(node.reactions).map((r) => normalizeReaction(cloneJsonValue(r)));
   current.push(reaction);
-  node.reactions = current;
-  return { success: true, nodeId: node.id, replaced: false, reactionsCount: node.reactions.length };
+  await setNodeReactions(node, current);
+  return { success: true, nodeId: node.id, replaced: false, reactionsCount: ensureArray(node.reactions).length };
 }
 
 async function setSmartAnimateReaction(params) {
@@ -3611,6 +3964,377 @@ async function setSmartAnimateReaction(params) {
   });
   if (!reactionParams.preset) reactionParams.preset = "smooth";
   return await setTransitionReaction(reactionParams);
+}
+
+// ---------------------------------------------------------------------------
+// Motion (timelines, manual keyframes, animation styles)
+// ---------------------------------------------------------------------------
+
+const MOTION_EASING_TYPES = new Set(Array.from(EASING_TYPES).concat(["HOLD"]));
+
+const MOTION_KEYFRAME_FIELDS = new Set([
+  "TRANSLATION_X", "TRANSLATION_Y", "TRANSLATION_XY",
+  "ROTATION", "SCALE_X", "SCALE_Y", "SCALE_XY",
+  "OPACITY", "CORNER_RADIUS",
+  "RECTANGLE_TOP_LEFT_CORNER_RADIUS", "RECTANGLE_TOP_RIGHT_CORNER_RADIUS",
+  "RECTANGLE_BOTTOM_LEFT_CORNER_RADIUS", "RECTANGLE_BOTTOM_RIGHT_CORNER_RADIUS",
+  "STROKE_WEIGHT", "BORDER_TOP_WEIGHT", "BORDER_BOTTOM_WEIGHT",
+  "BORDER_LEFT_WEIGHT", "BORDER_RIGHT_WEIGHT",
+  "STACK_SPACING", "STACK_COUNTER_SPACING",
+  "STACK_PADDING_LEFT", "STACK_PADDING_TOP", "STACK_PADDING_RIGHT", "STACK_PADDING_BOTTOM",
+  "GRID_ROW_GAP", "GRID_COLUMN_GAP",
+  "PATH_TRIM_START", "PATH_TRIM_END",
+  "WIDTH", "HEIGHT"
+]);
+
+const MOTION_UNAVAILABLE =
+  "Motion APIs are not enabled for this Figma user (they sit behind the `metronome` feature flag). " +
+  "Keyframes, animation styles, and timeline duration cannot be read or written until Figma enables it for this account. " +
+  "Prototype reactions (set_reactions / set_transition_reaction) are unaffected.";
+
+function motionEnabled() {
+  try {
+    return typeof figma.motion === "object" && figma.motion !== null &&
+      typeof figma.motion.figmaAnimationStyles === "function";
+  } catch (_err) {
+    return false;
+  }
+}
+
+function assertMotionEnabled() {
+  if (!motionEnabled()) throw new Error(MOTION_UNAVAILABLE);
+}
+
+function safeMotionRead(fn, fallback) {
+  try {
+    const value = fn();
+    return value === undefined ? fallback : cloneJsonValue(value);
+  } catch (_err) {
+    return fallback;
+  }
+}
+
+function normalizeMotionEasing(easing) {
+  if (easing === undefined || easing === null) return undefined;
+  const input = typeof easing === "string" ? { type: easing } : easing;
+  const type = String(input.type || "").toUpperCase();
+  if (!MOTION_EASING_TYPES.has(type)) {
+    throw new Error("Unsupported easing type: " + type + " (expected one of " + Array.from(MOTION_EASING_TYPES).join(", ") + ")");
+  }
+
+  if (type === "HOLD") return { type };
+  return normalizeEasing(input, type);
+}
+
+function normalizeKeyframeValue(value) {
+  if (value === null || value === undefined) throw new Error("Keyframe is missing a value");
+
+  if (typeof value === "number") return { type: "FLOAT", value };
+  if (typeof value !== "object") throw new Error("Keyframe value must be a number or an object");
+  const type = value.type === undefined || value.type === null ? "" : String(value.type).toUpperCase();
+  if (type === "FLOAT") return { type: "FLOAT", value: Number(value.value) };
+  if (type === "VECTOR") {
+    const v = value.value && typeof value.value === "object" ? value.value : value;
+    return { type: "VECTOR", value: { x: numOr(v.x, 0), y: numOr(v.y, 0) } };
+  }
+  if (type === "COLOR") return { type: "COLOR", value: normalizeColorParts(value.value || value.color) };
+  if (!type) {
+    if (value.x !== undefined || value.y !== undefined) return { type: "VECTOR", value: { x: numOr(value.x, 0), y: numOr(value.y, 0) } };
+    if (value.r !== undefined) return { type: "COLOR", value: normalizeColorParts(value) };
+  }
+  throw new Error("Unsupported keyframe value type: " + (type || "(none)") + " (expected FLOAT, VECTOR, or COLOR)");
+}
+
+function normalizeKeyframeTrack(track) {
+  const input = track && typeof track === "object" ? track : {};
+  const raw = ensureArray(input.keyframes);
+  if (!raw.length) throw new Error("A keyframe track needs at least one keyframe");
+  const keyframes = raw.map((k) => {
+    if (!k || typeof k !== "object") throw new Error("Each keyframe must be an object");
+    if (k.timelinePosition === undefined || k.timelinePosition === null) throw new Error("Each keyframe needs a timelinePosition (seconds)");
+    const position = Number(k.timelinePosition);
+    if (!Number.isFinite(position) || position < 0) throw new Error("timelinePosition must be a non-negative number of seconds");
+    const out = { timelinePosition: position, value: normalizeKeyframeValue(k.value) };
+    const easing = normalizeMotionEasing(k.easing);
+    if (easing) out.easing = easing;
+
+    if (k.id !== undefined && k.id !== null) out.id = String(k.id);
+    return out;
+  }).sort((a, b) => a.timelinePosition - b.timelinePosition);
+  const out = { keyframes };
+  if (input.id !== undefined && input.id !== null) out.id = String(input.id);
+  if (input.baseValue !== undefined && input.baseValue !== null) out.baseValue = input.baseValue;
+  return out;
+}
+
+const MOTION_INDEXED_COLLECTIONS = { FILL: "fills", FILLS: "fills", STROKE: "strokes", STROKES: "strokes", EFFECT: "effects", EFFECTS: "effects" };
+
+function resolveKeyframeTarget(params) {
+  const p = params && typeof params === "object" ? params : {};
+  const rawField = p.field;
+
+  if (rawField && typeof rawField === "object") return { kind: "raw", field: rawField };
+
+  const name = String(rawField || p.property || "").toUpperCase();
+  if (!name) throw new Error("Missing field (e.g. OPACITY, TRANSLATION_X, or FILLS with a paintIndex)");
+
+  const collection = MOTION_INDEXED_COLLECTIONS[name];
+  if (collection) {
+    const index = p.paintIndex !== undefined && p.paintIndex !== null ? Number(p.paintIndex)
+      : p.index !== undefined && p.index !== null ? Number(p.index) : null;
+    if (index === null || !Number.isFinite(index) || index < 0) {
+      throw new Error("Animating " + collection + " needs a zero-based paintIndex naming which " + collection.replace(/s$/, "") + " to animate");
+    }
+    return { kind: "indexed", collection, index: Math.floor(index) };
+  }
+
+  if (!MOTION_KEYFRAME_FIELDS.has(name)) {
+    throw new Error(
+      "Unsupported keyframe field: " + name +
+      ". Supported property fields: " + Array.from(MOTION_KEYFRAME_FIELDS).join(", ") +
+      ". For color/effect animation pass FILLS, STROKES, or EFFECTS with a paintIndex."
+    );
+  }
+  return { kind: "property", field: { type: "PROPERTY", name } };
+}
+
+function readMotionState(node) {
+  return {
+    nodeId: node.id,
+    name: node.name,
+    type: node.type,
+    timelines: safeMotionRead(() => node.timelines, []),
+    manualKeyframeTracks: safeMotionRead(() => node.manualKeyframeTracks, {}),
+    animationStyles: safeMotionRead(() => node.animationStyles, []),
+    animations: safeMotionRead(() => node.animations, null)
+  };
+}
+
+async function getMotion(params) {
+  const p = params && typeof params === "object" ? params : {};
+  if (!motionEnabled()) return { success: false, motionEnabled: false, error: MOTION_UNAVAILABLE };
+  const ids = ensureArray(p.nodeIds).concat(p.nodeId ? [p.nodeId] : []);
+  const targets = [];
+  if (ids.length) {
+    for (const id of ids) {
+      const node = await getNodeByIdAsync(normalizeFigmaNodeId(String(id)));
+      if (node) targets.push(node);
+    }
+  } else {
+    for (const node of ensureArray(figma.currentPage.selection)) targets.push(node);
+  }
+  if (!targets.length) throw new Error("No nodes given and nothing is selected");
+  return { success: true, motionEnabled: true, nodes: targets.map((n) => readMotionState(n)) };
+}
+
+async function setKeyframeTrack(params) {
+  const p = params && typeof params === "object" ? params : {};
+  assertMotionEnabled();
+  if (!p.nodeId) throw new Error("Missing nodeId");
+  const node = await getNodeByIdAsync(normalizeFigmaNodeId(String(p.nodeId)));
+  if (!node) throw new Error("Node not found with ID: " + String(p.nodeId));
+
+  const isTopLevelFrame = Boolean(node.parent && node.parent.type === "PAGE");
+  if (isTopLevelFrame && p.allowTopLevelFrame !== true) {
+    throw new Error(
+      "This is a top-level frame, which owns the timeline rather than animating on it, so keyframes here have no visible effect. " +
+      "Animate one of its descendants instead, or pass allowTopLevelFrame: true to write anyway."
+    );
+  }
+  if (typeof node.applyManualKeyframeTrack !== "function") throw new Error("Node does not support manual keyframe tracks");
+
+  const target = resolveKeyframeTarget(p);
+  const track = normalizeKeyframeTrack(p.track && typeof p.track === "object" ? p.track : { keyframes: p.keyframes });
+  const field = target.kind === "indexed"
+    ? { type: "INDEXED_ITEM", collection: target.collection, index: target.index }
+    : target.field;
+
+  if (target.kind === "indexed") {
+    const existing = node.manualKeyframeTracks || {};
+    const bucket = Object.assign({}, existing[target.collection] || {});
+    bucket[String(target.index)] = track;
+    node.manualKeyframeTracks = Object.assign({}, existing, { [target.collection]: bucket });
+  } else {
+    node.applyManualKeyframeTrack(field, track);
+  }
+
+  const lastPosition = track.keyframes[track.keyframes.length - 1].timelinePosition;
+  let timelineExtended = null;
+  if (p.extendTimeline !== false) {
+    const timeline = ensureArray(node.timelines)[0];
+    if (timeline && Number(timeline.duration) < lastPosition) {
+      node.setTimelineDuration(timeline.id, lastPosition);
+      timelineExtended = { timelineId: timeline.id, duration: lastPosition };
+    }
+  }
+  return {
+    success: true,
+    nodeId: node.id,
+    field,
+    keyframeCount: track.keyframes.length,
+    timelineExtended,
+    manualKeyframeTracks: safeMotionRead(() => node.manualKeyframeTracks, {}),
+    timelines: safeMotionRead(() => node.timelines, [])
+  };
+}
+
+async function removeKeyframeTrack(params) {
+  const p = params && typeof params === "object" ? params : {};
+  assertMotionEnabled();
+  if (!p.nodeId) throw new Error("Missing nodeId");
+  const node = await getNodeByIdAsync(normalizeFigmaNodeId(String(p.nodeId)));
+  if (!node) throw new Error("Node not found with ID: " + String(p.nodeId));
+  if (p.all === true) {
+    node.manualKeyframeTracks = {};
+    return { success: true, nodeId: node.id, removed: "all", manualKeyframeTracks: {} };
+  }
+  if (typeof node.removeManualKeyframeTrack !== "function") throw new Error("Node does not support manual keyframe tracks");
+  const target = resolveKeyframeTarget(p);
+  let field;
+  if (target.kind === "indexed") {
+    field = { type: "INDEXED_ITEM", collection: target.collection, index: target.index };
+    const existing = node.manualKeyframeTracks || {};
+    const bucket = Object.assign({}, existing[target.collection] || {});
+    delete bucket[String(target.index)];
+    const next = Object.assign({}, existing);
+    if (Object.keys(bucket).length) next[target.collection] = bucket;
+    else delete next[target.collection];
+    node.manualKeyframeTracks = next;
+  } else {
+    field = target.field;
+    node.removeManualKeyframeTrack(field);
+  }
+  return {
+    success: true,
+    nodeId: node.id,
+    field,
+    manualKeyframeTracks: safeMotionRead(() => node.manualKeyframeTracks, {})
+  };
+}
+
+async function listAnimationStyles() {
+  assertMotionEnabled();
+  const styles = ensureArray(figma.motion.figmaAnimationStyles());
+  return {
+    success: true,
+
+    styles: styles.map((s) => ({
+      styleId: s.styleId,
+      name: s.name,
+      description: s.description === undefined ? null : s.description,
+      props: cloneJsonValue(s.props)
+    }))
+  };
+}
+
+async function applyAnimationStyleAction(params) {
+  const p = params && typeof params === "object" ? params : {};
+  assertMotionEnabled();
+  if (!p.nodeId) throw new Error("Missing nodeId");
+  const node = await getNodeByIdAsync(normalizeFigmaNodeId(String(p.nodeId)));
+  if (!node) throw new Error("Node not found with ID: " + String(p.nodeId));
+  if (node.parent && node.parent.type === "PAGE" && p.allowTopLevelFrame !== true) {
+    throw new Error(
+      "This is a top-level frame, which owns the timeline rather than animating on it, so a style applied here has no visible effect. " +
+      "Apply it to one of its descendants instead, or pass allowTopLevelFrame: true to write anyway."
+    );
+  }
+  if (typeof node.applyAnimationStyle !== "function") throw new Error("Node does not support animation styles");
+
+  let styleId = p.styleId ? String(p.styleId) : "";
+  if (!styleId) {
+    const wanted = String(p.styleName || "").toLowerCase();
+    if (!wanted) throw new Error("Missing styleId or styleName (list them with list_animation_styles)");
+    const match = ensureArray(figma.motion.figmaAnimationStyles())
+      .find((s) => String(s.name || "").toLowerCase().indexOf(wanted) >= 0);
+    if (!match) throw new Error("No animation style matching: " + p.styleName);
+    styleId = match.styleId;
+  }
+
+  const preset = {};
+  if (p.duration !== undefined && p.duration !== null) preset.duration = Number(p.duration);
+  if (p.timelineOffset !== undefined && p.timelineOffset !== null) preset.timelineOffset = Number(p.timelineOffset);
+  if (p.name !== undefined && p.name !== null) preset.name = String(p.name);
+  if (p.props && typeof p.props === "object") {
+    const props = Object.assign({}, p.props);
+    if (props.easing !== undefined) props.easing = normalizeMotionEasing(props.easing);
+    preset.props = props;
+  }
+
+  const appliedId = Object.keys(preset).length ? node.applyAnimationStyle(styleId, preset) : node.applyAnimationStyle(styleId);
+
+  const end = numOr(preset.timelineOffset, 0) + numOr(preset.duration, 0);
+  let timelineExtended = null;
+  if (p.extendTimeline !== false && end > 0) {
+    const timeline = ensureArray(node.timelines)[0];
+    if (timeline && Number(timeline.duration) < end) {
+      node.setTimelineDuration(timeline.id, end);
+      timelineExtended = { timelineId: timeline.id, duration: end };
+    }
+  }
+  return {
+    success: true,
+    nodeId: node.id,
+    styleId,
+    appliedId: appliedId === undefined ? null : appliedId,
+    timelineExtended,
+
+    animationStyles: safeMotionRead(() => node.animationStyles, []),
+    timelines: safeMotionRead(() => node.timelines, [])
+  };
+}
+
+async function removeAnimationStyleAction(params) {
+  const p = params && typeof params === "object" ? params : {};
+  assertMotionEnabled();
+  if (!p.nodeId) throw new Error("Missing nodeId");
+  const node = await getNodeByIdAsync(normalizeFigmaNodeId(String(p.nodeId)));
+  if (!node) throw new Error("Node not found with ID: " + String(p.nodeId));
+  if (p.all === true) {
+    node.animationStyles = [];
+    return { success: true, nodeId: node.id, removed: "all", animationStyles: [] };
+  }
+  if (!p.appliedId) throw new Error("Missing appliedId (the id read back from animationStyles), or pass all: true");
+  if (typeof node.removeAnimationStyle !== "function") throw new Error("Node does not support animation styles");
+  node.removeAnimationStyle(String(p.appliedId));
+  return {
+    success: true,
+    nodeId: node.id,
+    appliedId: String(p.appliedId),
+    animationStyles: safeMotionRead(() => node.animationStyles, [])
+  };
+}
+
+async function setTimelineDurationAction(params) {
+  const p = params && typeof params === "object" ? params : {};
+  assertMotionEnabled();
+  if (!p.nodeId) throw new Error("Missing nodeId");
+  if (p.duration === undefined || p.duration === null) throw new Error("Missing duration (seconds)");
+  const duration = Number(p.duration);
+  if (!Number.isFinite(duration) || duration <= 0) throw new Error("duration must be a positive number of seconds");
+  const node = await getNodeByIdAsync(normalizeFigmaNodeId(String(p.nodeId)));
+  if (!node) throw new Error("Node not found with ID: " + String(p.nodeId));
+  const timelines = ensureArray(node.timelines);
+  if (!timelines.length) throw new Error("Node has no timeline — it must sit inside a top-level frame that owns one");
+  const timelineId = p.timelineId ? String(p.timelineId) : timelines[0].id;
+  node.setTimelineDuration(timelineId, duration);
+  return { success: true, nodeId: node.id, timelineId, duration, timelines: safeMotionRead(() => node.timelines, []) };
+}
+
+async function listShaders() {
+  if (typeof figma.listAvailableShaders !== "function") {
+    return { success: false, error: "Shaders are not available in this Figma build/account.", shaders: [] };
+  }
+  const shaders = ensureArray(await figma.listAvailableShaders());
+  return {
+    success: true,
+    shaders: shaders.map((s) => ({
+      id: s.id,
+      name: s.name,
+      kind: s.kind === undefined ? null : s.kind,
+      properties: cloneJsonValue(s.propertyDefinitions || s.properties || null)
+    }))
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -3737,8 +4461,6 @@ function serializeVariableValue(value) {
   return value;
 }
 
-// Bounded default page size for catalog listings so a single tool result stays
-// token-cheap even on huge files; callers page through with offset/limit.
 const DEFAULT_PAGE_SIZE = 500;
 
 function applyPage(items, params, defaultLimit) {
@@ -4042,9 +4764,6 @@ async function setNodeExplicitVariableMode(params) {
 // ---------------------------------------------------------------------------
 // Batch execution
 // ---------------------------------------------------------------------------
-// Runs multiple actions in one WebSocket round trip instead of one per action.
-// This is sequential execution with per-step error capture, NOT a transaction:
-// steps that already succeeded are not rolled back if a later step fails.
 
 async function runBatch(params) {
   const p = params && typeof params === "object" ? params : {};
@@ -4170,7 +4889,6 @@ async function getSelectionContext(params) {
       const response = await node.exportAsync({ format: "JSON_REST_V1" });
       entry.info = filterFigmaNode(response.document, readOptions);
     } catch (_err) {
-      // Best-effort: some node types (e.g. VECTOR) are intentionally excluded by filterFigmaNode.
     }
     if ("componentPropertyReferences" in node) {
       entry.componentPropertyReferences = serializeComponentPropertyReferences(node);
@@ -4180,11 +4898,10 @@ async function getSelectionContext(params) {
         const main = await getMainComponentForInstance(node);
         entry.mainComponentId = main ? main.id : null;
         const owner = main && main.parent && main.parent.type === "COMPONENT_SET" ? main.parent : main;
-        if (owner) entry.componentPropertyDefinitions = serializeComponentPropertyDefinitions(owner.componentPropertyDefinitions);
+        if (owner) entry.componentPropertyDefinitions = serializeComponentPropertyDefinitions(readComponentPropertyDefinitions(owner));
         entry.componentProperties = node.componentProperties || {};
         entry.slots = walkForSlotNodes(node).map((n) => ({ slotNodeId: n.id, name: n.name }));
       } catch (_err) {
-        // Best-effort: instance may reference a missing/remote main component.
       }
     }
     nodes.push(entry);
@@ -4195,11 +4912,6 @@ async function getSelectionContext(params) {
 // ---------------------------------------------------------------------------
 // Document tree / full-context reads
 // ---------------------------------------------------------------------------
-// These serialize the live scene graph directly (no exportAsync round trip) so
-// an AI agent can read the whole open file's structure in one call without
-// paying the token cost of full REST-style node dumps. Compact by design:
-// every node is {id, name, type}; extra fields (including TEXT characters) are
-// opt-in via `fields`. getDocumentTree defaults to maxDepth 3 to bound output.
 
 function countCompactTreeNodes(node) {
   let count = 1;
@@ -4399,6 +5111,52 @@ async function resolveVariableRef(ref) {
   }
 }
 
+const IMAGE_SCALE_MODES_ALL = new Set(["FILL", "FIT", "CROP", "TILE"]);
+
+function normalizePaint(p) {
+  if (!p || typeof p !== "object") throw new Error("Each fill must be an object");
+  const type = p.type === undefined || p.type === null ? "" : String(p.type).toUpperCase();
+  const out = { type };
+  if (p.visible !== undefined && p.visible !== null) out.visible = Boolean(p.visible);
+  if (p.opacity !== undefined && p.opacity !== null) out.opacity = normalize01From01Or255(p.opacity);
+  if (p.blendMode !== undefined && p.blendMode !== null) out.blendMode = String(p.blendMode);
+
+  if (type === "SOLID") {
+    const c = normalizeColorParts(p.color);
+
+    out.color = { r: c.r, g: c.g, b: c.b };
+    if (out.opacity === undefined && p.color && p.color.a !== undefined && p.color.a !== null) {
+      out.opacity = normalize01From01Or255(p.color.a);
+    }
+    return out;
+  }
+
+  if (type === "GRADIENT_LINEAR" || type === "GRADIENT_RADIAL" || type === "GRADIENT_ANGULAR" || type === "GRADIENT_DIAMOND") {
+    out.gradientStops = normalizeGradientStops(p.gradientStops || p.stops);
+    out.gradientTransform = Array.isArray(p.gradientTransform)
+      ? p.gradientTransform.map((row) => Array.from(row, Number))
+      : [[1, 0, 0], [0, 1, 0]];
+    return out;
+  }
+
+  if (type === "IMAGE") {
+    if (!p.imageHash) throw new Error("IMAGE fill requires imageHash");
+    out.imageHash = String(p.imageHash);
+    const scaleMode = p.scaleMode ? String(p.scaleMode).toUpperCase() : "FILL";
+    if (!IMAGE_SCALE_MODES_ALL.has(scaleMode)) throw new Error("Unsupported scaleMode: " + scaleMode);
+    out.scaleMode = scaleMode;
+    if (p.rotation !== undefined && p.rotation !== null) out.rotation = Number(p.rotation);
+    if (p.scalingFactor !== undefined && p.scalingFactor !== null) out.scalingFactor = Number(p.scalingFactor);
+    if (Array.isArray(p.imageTransform)) out.imageTransform = p.imageTransform.map((row) => Array.from(row, Number));
+    return out;
+  }
+
+  throw new Error(
+    "Unsupported fill type: " + type +
+    " (expected SOLID, GRADIENT_LINEAR, GRADIENT_RADIAL, GRADIENT_ANGULAR, GRADIENT_DIAMOND, or IMAGE)"
+  );
+}
+
 async function setImageFill(params) {
   if (!params || !params.nodeId) throw new Error("Missing nodeId");
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
@@ -4474,28 +5232,105 @@ async function setGradientFill(params) {
   return { success: true, nodeId: node.id, gradientType: figmaType, paintIndex, stopCount: fill.gradientStops.length };
 }
 
+function numOr(value, fallback) {
+  const n = Number(value === undefined || value === null ? fallback : value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function normalizeVector(value, fallbackX, fallbackY) {
+  const v = value && typeof value === "object" ? value : {};
+  return { x: numOr(v.x, fallbackX), y: numOr(v.y, fallbackY) };
+}
+
 function normalizeEffect(e) {
   if (!e || typeof e !== "object") throw new Error("Effect must be an object");
   const type = e.type === undefined || e.type === null ? "" : String(e.type).toUpperCase();
-  const out = { type };
+  const visible = e.visible === undefined || e.visible === null ? true : Boolean(e.visible);
+  const blendMode = e.blendMode === undefined || e.blendMode === null ? "NORMAL" : String(e.blendMode);
+
   if (type === "DROP_SHADOW" || type === "INNER_SHADOW") {
-    out.color = normalizeColorParts(e.color);
-    const offset = e.offset && typeof e.offset === "object" ? e.offset : {};
-    out.offset = { x: Number(offset.x || 0), y: Number(offset.y || 0) };
-    out.radius = Number(e.radius === undefined || e.radius === null ? 0 : e.radius);
-    out.spread = Number(e.spread === undefined || e.spread === null ? 0 : e.spread);
-    if (e.visible !== undefined && e.visible !== null) out.visible = Boolean(e.visible);
-    if (e.blendMode !== undefined && e.blendMode !== null) out.blendMode = String(e.blendMode);
+    const out = {
+      type,
+      color: normalizeColorParts(e.color),
+      offset: normalizeVector(e.offset, 0, 0),
+      radius: numOr(e.radius, 0),
+      spread: numOr(e.spread, 0),
+      visible,
+      blendMode
+    };
+
+    if (type === "DROP_SHADOW" && e.showShadowBehindNode !== undefined && e.showShadowBehindNode !== null) {
+      out.showShadowBehindNode = Boolean(e.showShadowBehindNode);
+    }
     if (e.boundVariables && typeof e.boundVariables === "object" && e.boundVariables.color) {
       out.boundVariables = { color: e.boundVariables.color };
     }
-  } else if (type === "LAYER_BLUR" || type === "BACKGROUND_BLUR") {
-    out.radius = Number(e.radius === undefined || e.radius === null ? 0 : e.radius);
-    if (e.visible !== undefined && e.visible !== null) out.visible = Boolean(e.visible);
-  } else {
-    throw new Error("Unsupported effect type: " + type);
+    return out;
   }
-  return out;
+
+  if (type === "LAYER_BLUR" || type === "BACKGROUND_BLUR") {
+    const blurType = e.blurType === undefined || e.blurType === null ? "NORMAL" : String(e.blurType).toUpperCase();
+    if (blurType !== "NORMAL" && blurType !== "PROGRESSIVE") {
+      throw new Error("Unsupported blurType: " + blurType + " (expected NORMAL or PROGRESSIVE)");
+    }
+    const out = { type, radius: numOr(e.radius, 0), visible, blurType };
+    if (blurType === "PROGRESSIVE") {
+      out.startRadius = numOr(e.startRadius, 0);
+      out.startOffset = normalizeVector(e.startOffset, 0, 0);
+      out.endOffset = normalizeVector(e.endOffset, 0, 1);
+    }
+    if (e.boundVariables && typeof e.boundVariables === "object" && e.boundVariables.radius) {
+      out.boundVariables = { radius: e.boundVariables.radius };
+    }
+    return out;
+  }
+
+  if (type === "NOISE") {
+    const noiseType = e.noiseType === undefined || e.noiseType === null ? "MONOTONE" : String(e.noiseType).toUpperCase();
+    if (noiseType !== "MONOTONE" && noiseType !== "DUOTONE" && noiseType !== "MULTITONE") {
+      throw new Error("Unsupported noiseType: " + noiseType + " (expected MONOTONE, DUOTONE, or MULTITONE)");
+    }
+
+    const out = {
+      type,
+      color: normalizeColorParts(e.color),
+      visible,
+      noiseSize: numOr(e.noiseSize, 1),
+      density: numOr(e.density, 0.5),
+      noiseType
+    };
+    if (noiseType === "DUOTONE") out.secondaryColor = normalizeColorParts(e.secondaryColor);
+    if (noiseType === "MULTITONE") out.opacity = numOr(e.opacity, 1);
+    return out;
+  }
+
+  if (type === "TEXTURE") {
+    return {
+      type,
+      visible,
+      noiseSize: numOr(e.noiseSize, 1),
+      radius: numOr(e.radius, 0),
+      clipToShape: e.clipToShape === undefined || e.clipToShape === null ? true : Boolean(e.clipToShape)
+    };
+  }
+
+  if (type === "GLASS") {
+    return {
+      type,
+      visible,
+      lightIntensity: numOr(e.lightIntensity, 0.5),
+      lightAngle: numOr(e.lightAngle, 0),
+      refraction: numOr(e.refraction, 0.5),
+      depth: numOr(e.depth, 0),
+      dispersion: numOr(e.dispersion, 0),
+      radius: numOr(e.radius, 0)
+    };
+  }
+
+  throw new Error(
+    "Unsupported effect type: " + type +
+    " (expected DROP_SHADOW, INNER_SHADOW, LAYER_BLUR, BACKGROUND_BLUR, NOISE, TEXTURE, or GLASS)"
+  );
 }
 
 async function setEffects(params) {
@@ -4688,12 +5523,28 @@ async function setTextStyle(params) {
   }
   if (params.textCase !== undefined && params.textCase !== null) node.textCase = String(params.textCase);
   if (params.textDecoration !== undefined && params.textDecoration !== null) node.textDecoration = String(params.textDecoration);
+
+  if (params.textWrapStyle !== undefined && params.textWrapStyle !== null) {
+    const wrap = String(params.textWrapStyle).toUpperCase();
+    if (!TEXT_WRAP_STYLES.has(wrap)) throw new Error("Unsupported textWrapStyle: " + wrap + " (expected AUTO, BALANCE, or PRETTY)");
+    if (!("textWrapStyle" in node)) throw new Error("This Figma build does not support textWrapStyle");
+    node.textWrapStyle = wrap;
+  }
+  if (params.textTruncation !== undefined && params.textTruncation !== null) {
+    const truncation = String(params.textTruncation).toUpperCase();
+    if (truncation !== "DISABLED" && truncation !== "ENDING") throw new Error("Unsupported textTruncation: " + truncation + " (expected DISABLED or ENDING)");
+    node.textTruncation = truncation;
+  }
+
+  if (params.maxLines !== undefined) {
+    node.maxLines = params.maxLines === null ? null : Math.max(1, Math.floor(Number(params.maxLines)));
+  }
   if (params.textAlignHorizontal !== undefined && params.textAlignHorizontal !== null) node.textAlignHorizontal = String(params.textAlignHorizontal);
   if (params.textAlignVertical !== undefined && params.textAlignVertical !== null) node.textAlignVertical = String(params.textAlignVertical);
   if (params.paragraphIndent !== undefined && params.paragraphIndent !== null) node.paragraphIndent = Number(params.paragraphIndent);
   if (params.paragraphSpacing !== undefined && params.paragraphSpacing !== null) node.paragraphSpacing = Number(params.paragraphSpacing);
   if (params.fillsHex) node.fills = [{ type: "SOLID", color: hexToRgb01(String(params.fillsHex)) }];
-  else if (params.fills !== undefined) node.fills = ensureArray(params.fills);
+  else if (params.fills !== undefined) node.fills = ensureArray(params.fills).map((p) => normalizePaint(p));
   if (params.fillStyleId) await setFillStyleId(node, String(params.fillStyleId));
   if (params.boundVariables && typeof params.boundVariables === "object" && "setBoundVariable" in node) {
     for (const prop of Object.keys(params.boundVariables)) {
@@ -4709,7 +5560,7 @@ async function createPage(params) {
   const page = figma.createPage();
   page.name = name;
   figma.root.appendChild(page);
-  if (params && params.activate === true) figma.currentPage = page;
+  if (params && params.activate === true) await figma.setCurrentPageAsync(page);
   return { success: true, pageId: page.id, name: page.name, activated: Boolean(params && params.activate === true) };
 }
 
@@ -4749,7 +5600,7 @@ async function duplicatePage(params) {
   if (parent && parent !== clone.parent && "appendChild" in parent) parent.appendChild(clone);
   const explicitName = params.name !== undefined && params.name !== null ? String(params.name) : null;
   clone.name = explicitName || nextDuplicateName(node.name, figma.root.children.map((p) => p.name));
-  if (params.activate === true) figma.currentPage = clone;
+  if (params.activate === true) await figma.setCurrentPageAsync(clone);
   return { success: true, pageId: node.id, newPageId: clone.id, name: clone.name, activated: Boolean(params && params.activate === true) };
 }
 
@@ -4757,7 +5608,8 @@ async function setCurrentPage(params) {
   if (!params || !params.pageId) throw new Error("Missing pageId");
   const node = await getNodeByIdAsync(String(params.pageId));
   if (node.type !== "PAGE") throw new Error("Node is not a PAGE");
-  figma.currentPage = node;
+
+  await figma.setCurrentPageAsync(node);
   return { success: true, pageId: node.id, name: node.name };
 }
 
@@ -4927,6 +5779,7 @@ async function bulkUpdate(params) {
 }
 
 async function resolveComponentByKey(key) {
+  await figma.loadAllPagesAsync();
   const local = figma.root.findAll((n) => (n.type === "COMPONENT" || n.type === "COMPONENT_SET") && String(n.key || "") === key);
   if (local.length) return local[0];
   try {
@@ -5343,9 +6196,7 @@ function collectModeKeys(col, values) {
   const modes = col && Array.isArray(col.modes) ? col.modes : [];
   const present = Object.keys(values || {}).filter((k) => values[k] !== undefined);
   const modeIdSet = new Set(modes.map((m) => m.modeId));
-  // Union of the collection's declared modes and every mode key the variable
-  // actually has a value for, so no per-mode value is ever dropped even if the
-  // collection's modes list doesn't line up 1:1 with valuesByMode.
+
   return Array.from(new Set([].concat(modeIdSet.size ? Array.from(modeIdSet) : [], present)));
 }
 
@@ -5459,9 +6310,9 @@ function w3cTypeToVariableType(type, value) {
   return null;
 }
 
-function findVariableInCollection(collection, name) {
+async function findVariableInCollection(collection, name) {
   for (const vid of collection.variableIds || []) {
-    const existing = figma.variables.getVariableById(vid);
+    const existing = await figma.variables.getVariableByIdAsync(vid);
     if (existing && existing.name === name) return existing;
   }
   return null;
@@ -5491,7 +6342,7 @@ async function importTokens(params) {
       results.push({ name: entry.name, status: "skipped", reason: "Unsupported token type: " + String(entry.type) });
       continue;
     }
-    let variable = findVariableInCollection(collection, entry.name);
+    let variable = await findVariableInCollection(collection, entry.name);
     if (!variable) variable = figma.variables.createVariable(entry.name, collection, resolvedType);
     const coerced = coerceVariableValue(resolvedType, entry.value);
     if (resolvedType === "COLOR" && coerced && typeof coerced === "object" && coerced.a === undefined) coerced.a = 1;
@@ -5647,7 +6498,7 @@ async function generatePalette(params) {
     }
 
     if (createVariables && collection) {
-      let variable = findVariableInCollection(collection, prefix + stepName);
+      let variable = await findVariableInCollection(collection, prefix + stepName);
       if (!variable) variable = figma.variables.createVariable(prefix + stepName, collection, "COLOR");
       if (collection.modes.length) variable.setValueForMode(collection.modes[0].modeId, { r: c.r, g: c.g, b: c.b, a: 1 });
     }
@@ -5729,12 +6580,10 @@ async function extractComponentSet(params) {
     name: set.name,
     type: set.type,
     componentIds: set.children.map((c) => c.id),
-    componentPropertyDefinitions: serializeComponentPropertyDefinitions(set.componentPropertyDefinitions)
+    componentPropertyDefinitions: serializeComponentPropertyDefinitions(readComponentPropertyDefinitions(set))
   };
 }
 
-// Actions that mutate a node (or its parent) must stay inside the recorded
-// target frame(s). Each entry extracts the node id(s) that must be scoped.
 const TARGET_SCOPED_ACTIONS = {
   rename_node: (p) => [p.nodeId],
   set_fill_color: (p) => [p.nodeId],
@@ -5746,6 +6595,8 @@ const TARGET_SCOPED_ACTIONS = {
   move_node: (p) => [p.nodeId],
   resize_node: (p) => [p.nodeId],
   resize_to_fit: (p) => [p.nodeId].concat(p.targetNodeId ? [String(p.targetNodeId)] : []),
+  bring_to_front: (p) => [p.nodeId],
+  send_to_back: (p) => [p.nodeId],
   set_corner_radius: (p) => [p.nodeId],
   set_text_content: (p) => [p.nodeId],
   set_multiple_text_contents: (p) => ensureArray(p.updates).map((u) => u && u.nodeId).filter(Boolean),
@@ -5805,10 +6656,6 @@ const TARGET_SCOPED_ACTIONS = {
   set_overlay_settings: (p) => [p.nodeId]
 };
 
-// Fail-closed target-frame enforcement: any allowed action that mutates nodes
-// must either have an extractor above, be a documented bulk/page/style/variable
-// operation in TARGET_EXEMPT_ACTIONS, or be a pure read in READ_ONLY_ACTIONS.
-// Otherwise enforceTargetScope throws instead of silently bypassing the guard.
 const READ_ONLY_ACTIONS = new Set([
   "ping", "get_document_info", "get_selection", "read_my_design",
   "get_node_info", "get_nodes_info", "get_all_pages", "get_document_tree",
@@ -5867,10 +6714,13 @@ const ALLOWED_ACTIONS = new Set([
   "set_fill_color", "set_stroke_color",
   "set_layout_mode", "set_padding", "set_axis_align", "set_layout_sizing", "set_item_spacing",
   "set_auto_layout", "set_layout_grids", "set_overflow_direction", "set_fixed_children",
+  "set_grid_layout", "get_grid_layout", "set_grid_child_position", "reorder_grid_tracks",
+  "get_motion", "set_keyframe_track", "remove_keyframe_track", "list_animation_styles",
+  "apply_animation_style", "remove_animation_style", "set_timeline_duration", "list_shaders",
   "move_node", "reparent_node", "get_parent_chain", "insert_child", "resize_node", "resize_to_fit",
   "delete_node", "delete_multiple_nodes",
   "clone_node", "clone_node_into_parent", "move_node_to_page",
-  "set_corner_radius",
+  "set_corner_radius", "bring_to_front", "send_to_back",
   "set_text_content", "set_multiple_text_contents",
   "create_paint_style", "create_text_style", "create_effect_style", "create_grid_style",
   "import_style_by_key",
@@ -5896,7 +6746,8 @@ const ALLOWED_ACTIONS = new Set([
   "create_page", "rename_page", "delete_page", "duplicate_page", "set_current_page", "reorder_page",
   "generate_grid",
   "bulk_rename", "bulk_update", "replace_all_instances",
-  "set_variable_mode", "create_variable_mode", "rename_variable_mode", "delete_variable_mode", "rename_variable_collection",
+  "set_variable_mode", "create_variable_mode", "rename_variable_mode", "delete_variable_mode",
+  "rename_variable_collection", "delete_variable_collection",
   "subscribe_events", "unsubscribe_events", "sync_target_frames",
   "undo", "redo", "get_style_guide", "get_font_list",
   "distribute_nodes", "arrange_children",
@@ -5927,7 +6778,6 @@ async function handleAction(action, payload) {
     return result;
   } catch (err) {
     if (undoable && undoBefore.length) {
-      // roll back pre-mutation state so a failed action does not leave a half-applied change
       try { await applySnapshotToNodes(undoBefore); } catch (_e) {}
     }
     throw err;
@@ -5948,7 +6798,10 @@ async function dispatchAction(action, payload) {
       action !== "delete_component_slot" &&
       action !== "clear_reactions" &&
       action !== "delete_page" &&
-      action !== "delete_variable_mode"
+      action !== "delete_variable_mode" &&
+      action !== "delete_variable_collection" &&
+      action !== "remove_keyframe_track" &&
+      action !== "remove_animation_style"
     ) {
       throw new Error(`Blocked action: ${action}`);
     }
@@ -6021,6 +6874,8 @@ async function dispatchAction(action, payload) {
     case "insert_child": return await insertChild(p);
     case "resize_node": return await resizeNode(p);
     case "resize_to_fit": return await resizeToFit(p);
+    case "bring_to_front": return await bringToFront(p);
+    case "send_to_back": return await sendToBack(p);
     case "delete_node": return await deleteNode(p);
     case "delete_multiple_nodes": return await deleteMultipleNodes(p);
     case "clone_node": return await cloneNode(p);
@@ -6038,6 +6893,21 @@ async function dispatchAction(action, payload) {
     case "set_layout_grids": return await setLayoutGrids(p);
     case "set_overflow_direction": return await setOverflowDirection(p);
     case "set_fixed_children": return await setFixedChildren(p);
+
+    case "set_grid_layout": return await setGridLayout(p);
+    case "get_grid_layout": return await getGridLayout(p);
+    case "set_grid_child_position": return await setGridChildPosition(p);
+    case "reorder_grid_tracks": return await reorderGridTracks(p);
+
+    case "get_motion": return await getMotion(p);
+    case "set_keyframe_track": return await setKeyframeTrack(p);
+    case "remove_keyframe_track": return await removeKeyframeTrack(p);
+    case "list_animation_styles": return await listAnimationStyles();
+    case "apply_animation_style": return await applyAnimationStyleAction(p);
+    case "remove_animation_style": return await removeAnimationStyleAction(p);
+    case "set_timeline_duration": return await setTimelineDurationAction(p);
+    case "list_shaders": return await listShaders();
+
     case "create_paint_style": return await createPaintStyle(p);
     case "create_text_style": return await createTextStyleAction(p);
     case "create_effect_style": return await createEffectStyle(p);
@@ -6155,10 +7025,6 @@ async function dispatchAction(action, payload) {
 // Message handler
 // ---------------------------------------------------------------------------
 
-// The undo/redo stacks live here in the main thread, so the UI buttons and the
-// agent's `undo`/`redo` MCP tools drive the same history: an agent edit can be
-// undone from the UI, and a UI undo is visible to the agent. Pushed to the UI
-// after every action so the buttons reflect real stack depth.
 function postUndoState() {
   try {
     figma.ui.postMessage({

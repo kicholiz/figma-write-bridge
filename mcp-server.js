@@ -799,6 +799,19 @@ const ALLOWED_MCP_TOOLS = new Set([
   "set_item_spacing",
   "set_focus",
   "set_selections",
+  "create_instance_from_instance",
+  "set_grid_layout",
+  "get_grid_layout",
+  "set_grid_child_position",
+  "reorder_grid_tracks",
+  "get_motion",
+  "set_keyframe_track",
+  "remove_keyframe_track",
+  "list_animation_styles",
+  "apply_animation_style",
+  "remove_animation_style",
+  "set_timeline_duration",
+  "list_shaders",
   "read_my_design",
   "figma_set_text",
   "figma_set_solid_fill",
@@ -1681,16 +1694,49 @@ server.registerTool(
 );
 
 server.registerTool(
+  "set_focus",
+  {
+    title: "Set focus",
+    description: "Select a single node and scroll the viewport to it. Switches to the node's page first, so this works with ids returned by a cross-page find_nodes. Use this to show the user what you just built or found.",
+    inputSchema: {
+      nodeId: z.string()
+    }
+  },
+  async ({ nodeId }) => {
+    const result = await sendCommand("set_focus", { nodeId });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
   "set_selections",
   {
     title: "Set selections",
-    description: "Set selection to multiple nodes and scroll viewport to show them.",
+    description: "Set selection to multiple nodes and scroll viewport to show them. Switches to the first node's page; Figma scopes selection to one page, so nodes on other pages are reported in skippedOnOtherPages.",
     inputSchema: {
       nodeIds: z.array(z.string())
     }
   },
   async ({ nodeIds }) => {
     const result = await sendCommand("set_selections", { nodeIds });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "create_instance_from_instance",
+  {
+    title: "Create instance from instance",
+    description: "Create a new instance of whatever main component an existing instance points at. Use this to duplicate a component usage you found on the canvas when you do not know its component id or key — read the source instance's overrides with get_instance_properties and reapply them with set_instance_properties if you need a copy rather than a fresh default instance.",
+    inputSchema: {
+      instanceId: z.string(),
+      x: z.number().optional(),
+      y: z.number().optional(),
+      parentId: z.string().optional()
+    }
+  },
+  async ({ instanceId, x, y, parentId }) => {
+    const result = await sendCommand("create_instance_from_instance", { instanceId, x, y, parentId });
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -2382,7 +2428,7 @@ server.registerTool(
   "set_layout_grids",
   {
     title: "Set layout grids",
-    description: "Set layout grids directly on a frame (layout guides).",
+    description: "Set layout grids (layout guides) on a frame. Each grid is either {pattern:'ROWS'|'COLUMNS', alignment:'MIN'|'MAX'|'CENTER'|'STRETCH', gutterSize, count, sectionSize?, offset?} or {pattern:'GRID', sectionSize}, plus optional visible and color. Figma rejects sectionSize when alignment is STRETCH and offset when alignment is CENTER; the bridge drops those rather than failing, and strips any key the pattern does not declare.",
     inputSchema: {
       frameId: z.string(),
       layoutGrids: z.array(z.any())
@@ -2877,7 +2923,7 @@ server.registerTool(
   "set_reactions",
   {
     title: "Set reactions",
-    description: "Set prototype reactions on a node (replaces existing reactions).",
+    description: "Set prototype reactions on a node (replaces existing reactions). Supports every action type including NODE navigation (NAVIGATE/SWAP/OVERLAY/SCROLL_TO/CHANGE_TO), BACK, CLOSE, URL, SET_VARIABLE, SET_VARIABLE_MODE, CONDITIONAL, and UPDATE_MEDIA_RUNTIME. Reactions are validated against a strict schema: transitions of type DISSOLVE/SMART_ANIMATE/SCROLL_ANIMATE must NOT carry direction or matchLayers (only MOVE_IN/MOVE_OUT/PUSH/SLIDE_IN/SLIDE_OUT may), and a NODE destination must be a valid target for its navigation type — NAVIGATE/SWAP need a top-level frame, OVERLAY an overlay-configured frame, SCROLL_TO a node inside a scrollable ancestor, CHANGE_TO a sibling variant in the same component set.",
     inputSchema: {
       nodeId: z.string(),
       reactions: z.array(z.any())
@@ -2908,7 +2954,7 @@ server.registerTool(
   "upsert_reaction",
   {
     title: "Upsert reaction",
-    description: "Replace the first matching reaction (by trigger/action/destination) or append if none match.",
+    description: "Replace the first matching reaction (by trigger/action/destination) or append if none match. Supports all action types including NODE navigation. Existing reactions on the node are re-normalized before being written back, so round-tripping does not trip the strict setter schema.",
     inputSchema: {
       nodeId: z.string(),
       match: z
@@ -2931,7 +2977,7 @@ server.registerTool(
   "get_animation_presets",
   {
     title: "Get animation presets",
-    description: "List curated motion presets plus the official Figma transition and easing values supported by this bridge.",
+    description: "List curated motion presets plus the official Figma transition and easing values supported by this bridge. Use these values with set_reactions, upsert_reaction, set_transition_reaction, and set_smart_animate_reaction.",
     inputSchema: {}
   },
   async () => {
@@ -2943,8 +2989,11 @@ server.registerTool(
       easingTypes: easingTypeSchema.options,
       notes: {
         durationUnit: "seconds",
-        scope: "Prototype transitions, Smart Animate, multi-action reactions, and overlay/flow settings via Figma reactions.",
-        limitation: "Smart Animate itself has no scriptable per-property keyframe/timeline API in Figma's Plugin API — it always auto-interpolates between the two frames/variants based on duration+easing. There is nothing to add here beyond the reaction/transition config this bridge already exposes."
+        scope: "Prototype transitions, Smart Animate, multi-action reactions, NODE navigation, and overlay/flow settings via Figma reactions.",
+        strictValidation: "Transitions are validated against a closed schema. DISSOLVE, SMART_ANIMATE and SCROLL_ANIMATE accept only {type, duration, easing} — adding direction or matchLayers fails with \"Unrecognized key(s) in object\". MOVE_IN, MOVE_OUT, PUSH, SLIDE_IN and SLIDE_OUT additionally require direction and matchLayers.",
+        destinationRules: "A NODE action's destination must suit its navigation type: NAVIGATE/SWAP need a top-level frame on a page, OVERLAY a frame configured as an overlay, SCROLL_TO a node inside a scrollable ancestor of the source, CHANGE_TO a sibling variant in the same component set. An unsuitable destination fails with \"Reaction at index N was invalid\".",
+        smartAnimate: "Smart Animate auto-interpolates between the two frames/variants from duration+easing; there is no per-property control inside a Smart Animate transition.",
+        propertyAnimation: "For per-property animation on a timeline (fade, slide, scale, color, spacing) use the Motion tools instead: get_motion, set_keyframe_track, apply_animation_style, set_timeline_duration. Reactions link frames; Motion animates properties within a frame."
       }
     };
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
@@ -2955,7 +3004,7 @@ server.registerTool(
   "set_transition_reaction",
   {
     title: "Set transition reaction",
-    description: "Create or replace a node-to-node prototype reaction with a typed transition/easing payload.",
+    description: "Create or replace a node-to-node prototype reaction with a typed transition/easing payload. Pass `preset` for a curated motion preset or `transition` for an explicit one; direction/matchLayers apply only to MOVE_IN/MOVE_OUT/PUSH/SLIDE_IN/SLIDE_OUT. Set replaceExisting:false to append instead of replacing the node's existing reactions.",
     inputSchema: {
       nodeId: z.string(),
       destinationId: z.string(),
@@ -2989,7 +3038,7 @@ server.registerTool(
   "set_smart_animate_reaction",
   {
     title: "Set smart animate reaction",
-    description: "Create or replace a node-to-node prototype reaction using Smart Animate with optional easing/preset overrides.",
+    description: "Create or replace a node-to-node prototype reaction using Smart Animate, with optional easing/preset overrides. Smart Animate interpolates matching layers between source and destination automatically; there is no per-property keyframe API.",
     inputSchema: {
       nodeId: z.string(),
       destinationId: z.string(),
@@ -3028,7 +3077,7 @@ server.registerTool(
   "get_overlay_settings",
   {
     title: "Get overlay settings",
-    description: "Read a frame/component's overlay prototype settings (position type, background, click-outside behavior). Used with NODE reactions whose navigation is OVERLAY.",
+    description: "Read a frame/component's overlay prototype settings (position type, background, click-outside behavior). These control HOW an overlay appears; the interaction that opens it is a NODE reaction with navigation OVERLAY, set via set_reactions or set_transition_reaction.",
     inputSchema: {
       nodeId: z.string()
     }
@@ -3155,6 +3204,246 @@ server.registerTool(
   }
 );
 
+const gridTrackSchema = z.union([
+  z.number(),
+  z.object({ type: z.enum(["FLEX", "FIXED", "HUG"]).optional(), value: z.number().optional() })
+]);
+
+server.registerTool(
+  "set_grid_layout",
+  {
+    title: "Set grid layout",
+    description: "Turn a frame into a GRID auto-layout container and configure it. GRID is a third layoutMode alongside HORIZONTAL/VERTICAL: children occupy cells rather than a single flow. Set rowCount/columnCount and the gaps, and optionally size individual tracks via rowSizes/columnSizes — each entry is a number (a FIXED px size) or {type:'FLEX'|'FIXED'|'HUG', value}. FLEX tracks share leftover space by their value as a weight. Position children afterwards with set_grid_child_position.",
+    inputSchema: {
+      nodeId: z.string(),
+      rowCount: z.number().int().positive().optional(),
+      columnCount: z.number().int().positive().optional(),
+      rowGap: z.number().optional(),
+      columnGap: z.number().optional(),
+      rowSizes: z.array(gridTrackSchema).optional(),
+      columnSizes: z.array(gridTrackSchema).optional(),
+      gridAutoTracks: z.enum(["NONE", "ROWS"]).optional(),
+      gridItemsPositioning: z.enum(["MANUAL", "ROW_AUTO_FLOW"]).optional()
+    }
+  },
+  async (args) => {
+    const result = await sendCommand("set_grid_layout", args);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "get_grid_layout",
+  {
+    title: "Get grid layout",
+    description: "Read a GRID frame's track counts, gaps, per-track sizes, and every child's cell, span, and alignment. Returns isGrid:false for a frame that is not in GRID layout. Call this before repositioning children so you know the grid's bounds.",
+    inputSchema: {
+      nodeId: z.string()
+    }
+  },
+  async ({ nodeId }) => {
+    const result = await sendCommand("get_grid_layout", { nodeId });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "set_grid_child_position",
+  {
+    title: "Set grid child position",
+    description: "Place a child in its GRID parent: row/column are 0-based anchor indices, rowSpan/columnSpan are how many tracks it covers, and the aligns control it inside its cell ('AUTO' stretches). Spans must fit inside the grid — anchor + span cannot exceed the track count, and the tool reports the actual bound if it does. A span also cannot cross a cell another child already occupies (Figma reports it as a span blocked by existing children in adjacent columns), so place and widen a spanning child BEFORE adding the children beside it. Children keep their own size by default; use align 'AUTO' on an axis to stretch into the cell.",
+    inputSchema: {
+      nodeId: z.string(),
+      row: z.number().int().nonnegative().optional(),
+      column: z.number().int().nonnegative().optional(),
+      rowSpan: z.number().int().positive().optional(),
+      columnSpan: z.number().int().positive().optional(),
+      horizontalAlign: z.enum(["MIN", "CENTER", "MAX", "AUTO"]).optional(),
+      verticalAlign: z.enum(["MIN", "CENTER", "MAX", "AUTO"]).optional()
+    }
+  },
+  async (args) => {
+    const result = await sendCommand("set_grid_child_position", args);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "reorder_grid_tracks",
+  {
+    title: "Reorder grid tracks",
+    description: "Move whole rows or columns of a GRID frame, taking their children with them. fromIndices lists the 0-based tracks to move and insertionIndex is where they land.",
+    inputSchema: {
+      nodeId: z.string(),
+      axis: z.enum(["ROWS", "COLUMNS"]),
+      fromIndices: z.array(z.number().int().nonnegative()).min(1),
+      insertionIndex: z.number().int().nonnegative()
+    }
+  },
+  async (args) => {
+    const result = await sendCommand("reorder_grid_tracks", args);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+const motionEasingSchema = z.union([
+  z.string(),
+  z.object({
+    type: z.string(),
+    easingFunctionCubicBezier: z.object({ x1: z.number(), y1: z.number(), x2: z.number(), y2: z.number() }).optional(),
+    easingFunctionSpring: z.object({ mass: z.number(), stiffness: z.number(), damping: z.number(), initialVelocity: z.number().optional() }).optional()
+  })
+]);
+
+const keyframeSchema = z.object({
+  timelinePosition: z.number().nonnegative(),
+  value: z.any(),
+  easing: motionEasingSchema.optional(),
+  id: z.string().optional()
+});
+
+server.registerTool(
+  "get_motion",
+  {
+    title: "Get motion",
+    description: "Read Motion state — timelines (with durations in seconds), manual keyframe tracks, applied animation styles, and resolved animations — for the given nodes, or the current selection when none are given. Motion is distinct from prototype reactions: reactions link frames on click, Motion animates properties over a timeline inside one top-level frame. Returns motionEnabled:false when the account lacks the Motion feature flag.",
+    inputSchema: {
+      nodeId: z.string().optional(),
+      nodeIds: z.array(z.string()).optional()
+    }
+  },
+  async (args) => {
+    const result = await sendCommand("get_motion", args);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "set_keyframe_track",
+  {
+    title: "Set keyframe track",
+    description: "Add or replace one manual keyframe track on a node. `field` is a property name (TRANSLATION_X/Y/XY, ROTATION, SCALE_X/Y/XY, OPACITY, CORNER_RADIUS, STROKE_WEIGHT, WIDTH, HEIGHT, STACK_* / GRID_* spacing, PATH_TRIM_START/END) or FILLS/STROKES/EFFECTS with a paintIndex. Transform fields COMPOSE with the node's resting transform (neutral 0, or 1 for scale); the others replace the value. timelinePosition is in seconds; the first keyframe's value holds back to t=0 and the last holds to the end, so no padding keyframes are needed. Easing on a keyframe describes the move INTO it, and adds 'HOLD' for step interpolation. The containing timeline is extended when the animation runs past it unless extendTimeline is false. Animate descendants: a top-level frame owns the timeline rather than animating on it, so keyframes there do nothing and are refused unless allowTopLevelFrame is true. Color and effect animation uses field FILLS, STROKES, or EFFECTS together with paintIndex.",
+    inputSchema: {
+      nodeId: z.string(),
+      field: z.string(),
+      paintIndex: z.number().int().nonnegative().optional(),
+      keyframes: z.array(keyframeSchema).min(1).optional(),
+      track: z.object({
+        id: z.string().optional(),
+        baseValue: z.any().optional(),
+        keyframes: z.array(keyframeSchema).min(1)
+      }).optional(),
+      extendTimeline: z.boolean().optional(),
+      allowTopLevelFrame: z.boolean().optional()
+    }
+  },
+  async (args) => {
+    const result = await sendCommand("set_keyframe_track", args);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "remove_keyframe_track",
+  {
+    title: "Remove keyframe track",
+    description: "Remove one manual keyframe track from a node by field (same field naming as set_keyframe_track), or pass all:true to clear every manual track on the node.",
+    inputSchema: {
+      nodeId: z.string(),
+      field: z.string().optional(),
+      paintIndex: z.number().int().nonnegative().optional(),
+      all: z.boolean().optional()
+    }
+  },
+  async (args) => {
+    const result = await sendCommand("remove_keyframe_track", args);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "list_animation_styles",
+  {
+    title: "List animation styles",
+    description: "List Figma's first-party animation styles, each with its styleId and the props it accepts. Call this before apply_animation_style to get a real styleId. Note `name` is an i18n key (e.g. 'motion.preset_name.position') and each entry in `props` is a documentation string describing the prop, not a value to send back.",
+    inputSchema: {}
+  },
+  async () => {
+    const result = await sendCommand("list_animation_styles", {});
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "apply_animation_style",
+  {
+    title: "Apply animation style",
+    description: "Apply a reusable animation style to a node. Identify it by styleId from list_animation_styles, or by styleName for a substring match. duration and timelineOffset are seconds and are top-level, not props. Returns the applied instance id needed by remove_animation_style. Verify the result against animationStyles in the response — applying a style does not materialize tracks into `animations`.",
+    inputSchema: {
+      nodeId: z.string(),
+      styleId: z.string().optional(),
+      styleName: z.string().optional(),
+      name: z.string().optional(),
+      duration: z.number().nonnegative().optional(),
+      timelineOffset: z.number().nonnegative().optional(),
+      props: z.record(z.any()).optional(),
+      extendTimeline: z.boolean().optional(),
+      allowTopLevelFrame: z.boolean().optional()
+    }
+  },
+  async (args) => {
+    const result = await sendCommand("apply_animation_style", args);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "remove_animation_style",
+  {
+    title: "Remove animation style",
+    description: "Remove one applied animation style from a node by its appliedId (read it from get_motion's animationStyles), or pass all:true to remove every applied style.",
+    inputSchema: {
+      nodeId: z.string(),
+      appliedId: z.string().optional(),
+      all: z.boolean().optional()
+    }
+  },
+  async (args) => {
+    const result = await sendCommand("remove_animation_style", args);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "set_timeline_duration",
+  {
+    title: "Set timeline duration",
+    description: "Set the duration, in seconds, of the timeline owned by the node's containing top-level frame. Omit timelineId to use the node's first timeline. Lengthen to make room for an animation; do not shorten unless the user asked, since it truncates existing motion.",
+    inputSchema: {
+      nodeId: z.string(),
+      duration: z.number().positive(),
+      timelineId: z.string().optional()
+    }
+  },
+  async (args) => {
+    const result = await sendCommand("set_timeline_duration", args);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "list_shaders",
+  {
+    title: "List shaders",
+    description: "List shader effects and fills available to this file, with their ids and property definitions. Returns an empty list when the account has no shaders published or the build does not support them.",
+    inputSchema: {}
+  },
+  async () => {
+    const result = await sendCommand("list_shaders", {});
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
 server.registerTool(
   "list_variable_collections",
   {
@@ -3226,7 +3515,7 @@ server.registerTool(
   "create_variable",
   {
     title: "Create variable",
-    description: "Create a local variable in a collection and set values by mode.",
+    description: "Create a local variable in a collection and set values by mode. resolvedType: COLOR, FLOAT, STRING, BOOLEAN, EASING, or TIMING — EASING and TIMING hold motion easing curves and durations, letting a design system tokenize animation alongside color and spacing.",
     inputSchema: {
       collectionId: z.string(),
       name: z.string(),
@@ -3461,7 +3750,7 @@ server.registerTool(
   "set_layout_mode",
   {
     title: "Set layout mode",
-    description: "Set the layout mode and wrap behavior of a frame (NONE, HORIZONTAL, VERTICAL).",
+    description: "Set the layout mode and wrap behavior of a frame: NONE, HORIZONTAL, VERTICAL, or GRID. GRID is a full cell-based layout — configure its tracks with set_grid_layout and place children with set_grid_child_position. layoutWrap (NO_WRAP | WRAP) applies to HORIZONTAL only.",
     inputSchema: {
       nodeId: z.string(),
       layoutMode: z.string(),
@@ -3497,7 +3786,7 @@ server.registerTool(
   "set_axis_align",
   {
     title: "Set axis align",
-    description: "Set primary and counter axis alignment for auto-layout frames.",
+    description: "Set primary and counter axis alignment for auto-layout frames. primaryAxisAlignItems: MIN, CENTER, MAX, SPACE_BETWEEN, SPACE_AROUND, or SPACE_EVENLY (SPACE_AROUND and SPACE_EVENLY distribute children with equal space around or between them, padding included). counterAxisAlignItems: MIN, CENTER, MAX, or BASELINE.",
     inputSchema: {
       nodeId: z.string(),
       primaryAxisAlignItems: z.string().optional(),
@@ -3839,7 +4128,7 @@ server.registerTool(
   "set_effects",
   {
     title: "Set effects",
-    description: "Set effects on a node. Pass effectStyleId to apply an existing style, or effects as raw array (DROP_SHADOW, INNER_SHADOW, LAYER_BLUR, BACKGROUND_BLUR). boundVariables.color can bind a variable to the shadow color.",
+    description: "Set effects on a node. Pass effectStyleId to apply an existing style, or effects as a raw array. Supported types: DROP_SHADOW and INNER_SHADOW ({color, offset:{x,y}, radius, spread}; DROP_SHADOW also takes showShadowBehindNode), LAYER_BLUR and BACKGROUND_BLUR ({radius, blurType:'NORMAL'} or blurType:'PROGRESSIVE' with startRadius/startOffset/endOffset), NOISE ({color, noiseSize, density, noiseType:'MONOTONE'|'DUOTONE'|'MULTITONE'}), TEXTURE ({noiseSize, radius, clipToShape}), and GLASS ({lightIntensity, lightAngle, refraction, depth, dispersion, radius}). Figma requires visible and blendMode on shadows and visible plus blurType on blurs; the bridge fills those in and strips any key the effect variant does not declare, so pass only the fields you care about and never echo back an effect read off another node. boundVariables.color can bind a variable to the shadow color.",
     inputSchema: z
       .object({
         nodeId: z.string(),
@@ -3988,7 +4277,7 @@ server.registerTool(
   "set_text_style",
   {
     title: "Set text style",
-    description: "Apply a text style and/or fine-grained typography to a TEXT node. Pass textStyleId to apply an existing style; also supports fontFamily/fontStyle, fontSize, lineHeight (number|'AUTO'|{unit,value}), letterSpacing (number|{unit,value}), textCase, textDecoration, textAlignHorizontal/Vertical, paragraphIndent/Spacing, fillsHex/fills/fillStyleId, and boundVariables.",
+    description: "Apply a text style and/or fine-grained typography to a TEXT node. Pass textStyleId to apply an existing style; also supports fontFamily/fontStyle, fontSize, lineHeight (number|'AUTO'|{unit,value}), letterSpacing (number|{unit,value}), textCase, textDecoration, textAlignHorizontal/Vertical, paragraphIndent/Spacing, fillsHex/fills/fillStyleId, boundVariables, textWrapStyle (AUTO | BALANCE for even line lengths, good on headings | PRETTY to avoid orphans), textTruncation (DISABLED | ENDING) and maxLines (an integer, or null to clear the cap; needs truncation ENDING to take effect).",
     inputSchema: {
       nodeId: z.string(),
       textStyleId: z.string().optional(),
@@ -4006,12 +4295,15 @@ server.registerTool(
       fillsHex: z.string().optional(),
       fills: z.array(z.any()).optional(),
       fillStyleId: z.string().optional(),
-      boundVariables: z.record(z.string()).optional()
+      boundVariables: z.record(z.string()).optional(),
+      textWrapStyle: z.enum(["AUTO", "BALANCE", "PRETTY"]).optional(),
+      textTruncation: z.enum(["DISABLED", "ENDING"]).optional(),
+      maxLines: z.number().int().positive().nullable().optional()
     }
   },
-  async ({ nodeId, textStyleId, fontFamily, fontStyle, fontSize, lineHeight, letterSpacing, textCase, textDecoration, textAlignHorizontal, textAlignVertical, paragraphIndent, paragraphSpacing, fillsHex, fills, fillStyleId, boundVariables }) => {
+  async ({ nodeId, textStyleId, fontFamily, fontStyle, fontSize, lineHeight, letterSpacing, textCase, textDecoration, textAlignHorizontal, textAlignVertical, paragraphIndent, paragraphSpacing, fillsHex, fills, fillStyleId, boundVariables, textWrapStyle, textTruncation, maxLines }) => {
     const result = await sendCommand("set_text_style", {
-      nodeId, textStyleId, fontFamily, fontStyle, fontSize, lineHeight, letterSpacing, textCase, textDecoration, textAlignHorizontal, textAlignVertical, paragraphIndent, paragraphSpacing, fillsHex, fills, fillStyleId, boundVariables
+      nodeId, textStyleId, fontFamily, fontStyle, fontSize, lineHeight, letterSpacing, textCase, textDecoration, textAlignHorizontal, textAlignVertical, paragraphIndent, paragraphSpacing, fillsHex, fills, fillStyleId, boundVariables, textWrapStyle, textTruncation, maxLines
     });
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
