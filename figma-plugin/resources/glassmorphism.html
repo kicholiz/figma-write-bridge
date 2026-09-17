@@ -1,0 +1,1711 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cube UI Kit — Architectural Glass</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <style>
+        *,
+        *::before,
+        *::after {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        :root {
+            --primary-blue: #2563FF;
+            --primary-blue-dark: #1D4ED8;
+            --deep-blue: #0F3DCC;
+            --surface-glass: rgba(37, 99, 255, 0.10);
+            --surface-glass-strong: rgba(37, 99, 255, 0.18);
+            --border-glass: rgba(37, 99, 255, 0.35);
+            --glow-blue: rgba(59, 130, 246, 0.45);
+            --bg: #F5F7FB;
+            --bg-alt: #EEF2F8;
+            --text-primary: #0F172A;
+            --text-secondary: #334155;
+            --radius-sm: 6px;
+            --radius-default: 10px;
+            --radius-card: 14px;
+            --radius-hero: 18px;
+            --space-4: 4px;
+            --space-8: 8px;
+            --space-12: 12px;
+            --space-16: 16px;
+            --space-24: 24px;
+            --space-32: 32px;
+            --space-48: 48px;
+            --space-64: 64px;
+            --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            --fw-500: 500;
+            --fw-600: 600;
+            --fw-700: 700;
+            --shadow-level1: 0 4px 12px rgba(37, 99, 255, 0.06), 0 1px 3px rgba(37, 99, 255, 0.04);
+            --shadow-level2: 0 8px 30px rgba(37, 99, 255, 0.10), 0 2px 8px rgba(37, 99, 255, 0.06);
+            --shadow-level3: 0 20px 60px rgba(37, 99, 255, 0.14), 0 4px 16px rgba(37, 99, 255, 0.08);
+            --ease: cubic-bezier(0.25, 0.46, 0.45, 0.94);
+            --duration: 0.25s;
+        }
+        body {
+            font-family: var(--font);
+            background: var(--bg);
+            color: var(--text-primary);
+            line-height: 1.6;
+            padding: var(--space-48);
+            -webkit-font-smoothing: antialiased;
+        }
+        .container {
+            max-width: 1360px;
+            margin: 0 auto;
+        }
+        .section {
+            margin-bottom: var(--space-64);
+        }
+        .section-title {
+            font-size: 1.5rem;
+            font-weight: var(--fw-600);
+            letter-spacing: -0.02em;
+            margin-bottom: var(--space-24);
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: var(--space-12);
+        }
+        .section-title small {
+            font-size: 0.75rem;
+            font-weight: var(--fw-500);
+            color: var(--text-secondary);
+            letter-spacing: 0.02em;
+            text-transform: uppercase;
+            background: var(--bg-alt);
+            padding: 2px var(--space-12);
+            border-radius: 20px;
+        }
+        .grid-2 {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: var(--space-24);
+        }
+        .grid-3 {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: var(--space-24);
+        }
+        .grid-4 {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: var(--space-24);
+        }
+        .flex-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: var(--space-16);
+            align-items: center;
+        }
+        .flex-col {
+            display: flex;
+            flex-direction: column;
+            gap: var(--space-16);
+        }
+        .flex-center {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .gap-8 {
+            gap: var(--space-8);
+        }
+        .gap-12 {
+            gap: var(--space-12);
+        }
+        .gap-24 {
+            gap: var(--space-24);
+        }
+        .mt-16 {
+            margin-top: var(--space-16);
+        }
+        .mt-24 {
+            margin-top: var(--space-24);
+        }
+        .mb-16 {
+            margin-bottom: var(--space-16);
+        }
+        .label {
+            font-size: 0.75rem;
+            font-weight: var(--fw-500);
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .divider {
+            border: none;
+            border-top: 1px solid rgba(37, 99, 255, 0.10);
+            margin: var(--space-32) 0;
+        }
+        .glass {
+            background: var(--surface-glass);
+            backdrop-filter: blur(4px);
+            -webkit-backdrop-filter: blur(4px);
+            border: 1px solid var(--border-glass);
+            border-top-color: rgba(255, 255, 255, 0.6);
+            border-left-color: rgba(255, 255, 255, 0.25);
+            border-right-color: var(--border-glass);
+            border-bottom-color: var(--border-glass);
+            box-shadow: var(--shadow-level1), inset 0 1px 0 rgba(255, 255, 255, 0.4);
+        }
+        .glass-strong {
+            background: var(--surface-glass-strong);
+            backdrop-filter: blur(6px);
+            -webkit-backdrop-filter: blur(6px);
+            border: 1px solid var(--border-glass);
+            border-top-color: rgba(255, 255, 255, 0.7);
+            border-left-color: rgba(255, 255, 255, 0.3);
+            box-shadow: var(--shadow-level2), inset 0 1px 0 rgba(255, 255, 255, 0.5);
+        }
+        .elevation-demo {
+            display: flex;
+            gap: var(--space-32);
+            flex-wrap: wrap;
+        }
+        .elevation-box {
+            width: 120px;
+            height: 120px;
+            border-radius: var(--radius-default);
+            background: var(--surface-glass);
+            border: 1px solid var(--border-glass);
+            border-top-color: rgba(255, 255, 255, 0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.7rem;
+            font-weight: var(--fw-500);
+            color: var(--text-secondary);
+            transition: all var(--duration) var(--ease);
+        }
+        .elevation-box.level1 {
+            box-shadow: var(--shadow-level1), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+        }
+        .elevation-box.level2 {
+            box-shadow: var(--shadow-level2), inset 0 1px 0 rgba(255, 255, 255, 0.4);
+            border-color: rgba(37, 99, 255, 0.45);
+        }
+        .elevation-box.level3 {
+            box-shadow: var(--shadow-level3), inset 0 1px 0 rgba(255, 255, 255, 0.5);
+            border-color: rgba(37, 99, 255, 0.55);
+            background: var(--surface-glass-strong);
+        }
+        .swatches {
+            display: flex;
+            flex-wrap: wrap;
+            gap: var(--space-16);
+        }
+        .swatch {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: var(--space-8);
+            min-width: 80px;
+        }
+        .swatch-color {
+            width: 64px;
+            height: 64px;
+            border-radius: var(--radius-default);
+            border: 1px solid rgba(0, 0, 0, 0.06);
+            box-shadow: var(--shadow-level1);
+        }
+        .swatch-label {
+            font-size: 0.65rem;
+            font-weight: var(--fw-500);
+            color: var(--text-secondary);
+            text-align: center;
+            line-height: 1.3;
+        }
+        .btn-glass {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: var(--space-8);
+            padding: 10px var(--space-24);
+            border-radius: var(--radius-default);
+            font-family: var(--font);
+            font-size: 0.875rem;
+            font-weight: var(--fw-600);
+            color: var(--primary-blue-dark);
+            background: var(--surface-glass);
+            backdrop-filter: blur(4px);
+            -webkit-backdrop-filter: blur(4px);
+            border: 1px solid var(--border-glass);
+            border-top-color: rgba(255, 255, 255, 0.6);
+            border-left-color: rgba(255, 255, 255, 0.25);
+            border-right-color: var(--border-glass);
+            border-bottom-color: var(--border-glass);
+            box-shadow: var(--shadow-level1), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+            cursor: pointer;
+            transition: all var(--duration) var(--ease);
+            text-decoration: none;
+            user-select: none;
+            position: relative;
+        }
+        .btn-glass:hover {
+            background: var(--surface-glass-strong);
+            box-shadow: var(--shadow-level2), inset 0 1px 0 rgba(255, 255, 255, 0.4), 0 0 20px var(--glow-blue);
+            transform: translateY(-1px);
+            border-color: rgba(37, 99, 255, 0.5);
+        }
+        .btn-glass:active {
+            transform: translateY(0px);
+            box-shadow: var(--shadow-level1), inset 0 2px 4px rgba(37, 99, 255, 0.15);
+            border-color: var(--border-glass);
+        }
+        .btn-glass:focus-visible {
+            outline: 2px solid var(--primary-blue);
+            outline-offset: 2px;
+        }
+        .btn-glass.primary {
+            background: var(--primary-blue-dark);
+            color: #fff;
+            border-color: var(--primary-blue-dark);
+            border-top-color: rgba(255, 255, 255, 0.4);
+            box-shadow: var(--shadow-level2), 0 0 30px rgba(37, 99, 255, 0.2);
+        }
+        .btn-glass.primary:hover {
+            background: var(--deep-blue);
+            box-shadow: var(--shadow-level3), 0 0 40px rgba(37, 99, 255, 0.3);
+            border-color: var(--deep-blue);
+        }
+        .btn-glass.primary:active {
+            box-shadow: var(--shadow-level1), inset 0 2px 8px rgba(0, 0, 0, 0.15);
+        }
+        .btn-glass.small {
+            padding: 6px var(--space-16);
+            font-size: 0.75rem;
+        }
+        .btn-glass.large {
+            padding: 14px var(--space-32);
+            font-size: 1rem;
+        }
+        .btn-glass:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+            transform: none !important;
+        }
+        .btn-cube {
+            width: 48px;
+            height: 48px;
+            border-radius: var(--radius-sm);
+            background: var(--surface-glass);
+            backdrop-filter: blur(4px);
+            -webkit-backdrop-filter: blur(4px);
+            border: 1px solid var(--border-glass);
+            border-top-color: rgba(255, 255, 255, 0.6);
+            border-left-color: rgba(255, 255, 255, 0.25);
+            border-right-color: var(--border-glass);
+            border-bottom-color: var(--border-glass);
+            box-shadow: var(--shadow-level1), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+            cursor: pointer;
+            transition: all var(--duration) var(--ease);
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--primary-blue-dark);
+            font-size: 1.25rem;
+            font-weight: var(--fw-600);
+            position: relative;
+            transform: rotate(0deg);
+        }
+        .btn-cube::after {
+            content: '';
+            position: absolute;
+            inset: 2px;
+            border-radius: calc(var(--radius-sm) - 2px);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity var(--duration) var(--ease);
+        }
+        .btn-cube:hover {
+            background: var(--surface-glass-strong);
+            box-shadow: var(--shadow-level2), inset 0 1px 0 rgba(255, 255, 255, 0.4), 0 0 24px var(--glow-blue);
+            transform: translateY(-2px) rotate(2deg);
+            border-color: rgba(37, 99, 255, 0.5);
+        }
+        .btn-cube:hover::after {
+            opacity: 1;
+        }
+        .btn-cube:active {
+            transform: translateY(0px) rotate(0deg);
+            box-shadow: var(--shadow-level1), inset 0 2px 4px rgba(37, 99, 255, 0.15);
+        }
+        .btn-cube:focus-visible {
+            outline: 2px solid var(--primary-blue);
+            outline-offset: 2px;
+        }
+        .btn-cube.primary {
+            background: var(--primary-blue-dark);
+            color: #fff;
+            border-color: var(--primary-blue-dark);
+            border-top-color: rgba(255, 255, 255, 0.4);
+            box-shadow: var(--shadow-level2), 0 0 30px rgba(37, 99, 255, 0.2);
+        }
+        .btn-cube.primary:hover {
+            background: var(--deep-blue);
+            box-shadow: var(--shadow-level3), 0 0 40px rgba(37, 99, 255, 0.3);
+        }
+        .btn-cube.large {
+            width: 56px;
+            height: 56px;
+            font-size: 1.5rem;
+        }
+        .btn-cube.small {
+            width: 36px;
+            height: 36px;
+            font-size: 0.875rem;
+        }
+        .btn-cube .icon {
+            line-height: 1;
+        }
+        .btn-cube:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+            transform: none !important;
+        }
+        .input-group {
+            display: flex;
+            flex-direction: column;
+            gap: var(--space-8);
+            width: 100%;
+            max-width: 320px;
+        }
+        .input-group label {
+            font-size: 0.75rem;
+            font-weight: var(--fw-500);
+            color: var(--text-secondary);
+            letter-spacing: 0.02em;
+        }
+        .input-field {
+            display: flex;
+            align-items: center;
+            gap: var(--space-12);
+            padding: 0 var(--space-16);
+            border-radius: var(--radius-default);
+            background: var(--surface-glass);
+            backdrop-filter: blur(4px);
+            -webkit-backdrop-filter: blur(4px);
+            border: 1px solid var(--border-glass);
+            border-left-color: rgba(255, 255, 255, 0.4);
+            border-top-color: rgba(255, 255, 255, 0.5);
+            border-right-color: var(--border-glass);
+            border-bottom-color: var(--border-glass);
+            box-shadow: var(--shadow-level1), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+            transition: all var(--duration) var(--ease);
+            min-height: 44px;
+        }
+        .input-field .icon {
+            color: var(--text-secondary);
+            font-size: 1rem;
+            opacity: 0.6;
+            flex-shrink: 0;
+        }
+        .input-field input {
+            flex: 1;
+            border: none;
+            background: transparent;
+            padding: 10px 0;
+            font-family: var(--font);
+            font-size: 0.875rem;
+            color: var(--text-primary);
+            outline: none;
+            min-width: 0;
+        }
+        .input-field input::placeholder {
+            color: #64748B;
+            opacity: 1;
+        }
+        .input-field:focus-within {
+            border-color: var(--primary-blue);
+            box-shadow: var(--shadow-level2), 0 0 0 3px rgba(37, 99, 255, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.4);
+            background: var(--surface-glass-strong);
+            border-left-color: var(--primary-blue);
+            border-top-color: rgba(255, 255, 255, 0.7);
+        }
+        .input-field input:focus-visible {
+            outline: none;
+        }
+        .input-field.error {
+            border-color: #B91C1C;
+            box-shadow: 0 0 0 3px rgba(185, 28, 28, 0.12);
+        }
+        .input-field.error .icon {
+            color: #B91C1C;
+            opacity: 1;
+        }
+        .input-helper {
+            font-size: 0.7rem;
+            color: var(--text-secondary);
+            padding-left: var(--space-4);
+        }
+        .input-helper.error {
+            color: #B91C1C;
+        }
+        .card {
+            border-radius: var(--radius-card);
+            background: var(--surface-glass);
+            backdrop-filter: blur(4px);
+            -webkit-backdrop-filter: blur(4px);
+            border: 1px solid var(--border-glass);
+            border-top-color: rgba(255, 255, 255, 0.6);
+            border-left-color: rgba(255, 255, 255, 0.25);
+            border-right-color: var(--border-glass);
+            border-bottom-color: var(--border-glass);
+            box-shadow: var(--shadow-level1), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+            overflow: hidden;
+            transition: all var(--duration) var(--ease);
+        }
+        .card:hover {
+            box-shadow: var(--shadow-level2), inset 0 1px 0 rgba(255, 255, 255, 0.4);
+        }
+        .card-header {
+            padding: var(--space-16) var(--space-24);
+            border-bottom: 1px solid rgba(37, 99, 255, 0.08);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-top: 2px solid rgba(255, 255, 255, 0.5);
+            border-top-left-radius: var(--radius-card);
+            border-top-right-radius: var(--radius-card);
+        }
+        .card-header .title {
+            font-weight: var(--fw-600);
+            font-size: 0.875rem;
+            color: var(--text-primary);
+        }
+        .card-header .action {
+            font-size: 0.7rem;
+            color: var(--primary-blue-dark);
+            font-weight: var(--fw-500);
+            cursor: pointer;
+            opacity: 0.7;
+            transition: opacity var(--duration) var(--ease);
+            background: transparent;
+            border: none;
+            font-family: var(--font);
+        }
+        .card-header .action:hover {
+            opacity: 1;
+        }
+        .card-header .action:focus-visible {
+            outline: 2px solid var(--primary-blue);
+            outline-offset: 2px;
+        }
+        .card-body {
+            padding: var(--space-24);
+        }
+        .card-footer {
+            padding: var(--space-12) var(--space-24);
+            border-top: 1px solid rgba(37, 99, 255, 0.06);
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            background: rgba(37, 99, 255, 0.02);
+        }
+        .card .metric-value {
+            font-size: 2.25rem;
+            font-weight: var(--fw-700);
+            letter-spacing: -0.02em;
+            color: var(--text-primary);
+            line-height: 1.2;
+        }
+        .card .metric-change {
+            font-size: 0.875rem;
+            font-weight: var(--fw-600);
+            color: #15803D;
+            display: inline-flex;
+            align-items: center;
+            gap: var(--space-4);
+        }
+        .card .metric-change.negative {
+            color: #B91C1C;
+        }
+        .card .metric-label {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            font-weight: var(--fw-500);
+        }
+        .table-wrap {
+            border-radius: var(--radius-card);
+            overflow: auto;
+            background: var(--surface-glass);
+            backdrop-filter: blur(4px);
+            -webkit-backdrop-filter: blur(4px);
+            border: 1px solid var(--border-glass);
+            border-top-color: rgba(255, 255, 255, 0.6);
+            border-left-color: rgba(255, 255, 255, 0.25);
+            box-shadow: var(--shadow-level1), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+        }
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.8125rem;
+        }
+        .data-table thead {
+            background: rgba(37, 99, 255, 0.04);
+            border-bottom: 1px solid rgba(37, 99, 255, 0.08);
+        }
+        .data-table th {
+            text-align: left;
+            padding: 12px var(--space-16);
+            font-weight: var(--fw-600);
+            color: var(--text-secondary);
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .data-table td {
+            padding: 12px var(--space-16);
+            border-bottom: 1px solid rgba(37, 99, 255, 0.04);
+            color: var(--text-primary);
+        }
+        .data-table tbody tr {
+            transition: all var(--duration) var(--ease);
+            cursor: default;
+        }
+        .data-table tbody tr:hover {
+            background: var(--surface-glass);
+            box-shadow: inset 3px 0 0 var(--primary-blue);
+        }
+        .data-table tbody tr.selected {
+            background: var(--surface-glass-strong);
+            border-left: 3px solid var(--primary-blue);
+            box-shadow: 0 0 20px rgba(37, 99, 255, 0.06);
+        }
+        .data-table tbody tr:last-child td {
+            border-bottom: none;
+        }
+        .data-table .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: var(--space-6);
+            font-size: 0.7rem;
+            font-weight: var(--fw-500);
+            padding: 2px var(--space-10);
+            border-radius: 20px;
+        }
+        .data-table .status-badge.active {
+            background: rgba(21, 128, 61, 0.12);
+            color: #15803D;
+        }
+        .data-table .status-badge.idle {
+            background: rgba(234, 179, 8, 0.12);
+            color: #CA8A04;
+        }
+        .data-table .status-badge.offline {
+            background: rgba(100, 116, 139, 0.12);
+            color: #64748B;
+        }
+        .data-table .status-badge .dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+        .data-table .status-badge.active .dot {
+            background: #15803D;
+        }
+        .data-table .status-badge.idle .dot {
+            background: #CA8A04;
+        }
+        .data-table .status-badge.offline .dot {
+            background: #64748B;
+        }
+        .topnav {
+            display: flex;
+            align-items: center;
+            gap: var(--space-24);
+            padding: var(--space-12) var(--space-24);
+            border-radius: var(--radius-card);
+            background: var(--surface-glass);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            border: 1px solid var(--border-glass);
+            border-top-color: rgba(255, 255, 255, 0.6);
+            border-left-color: rgba(255, 255, 255, 0.25);
+            box-shadow: var(--shadow-level1), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+            margin-bottom: var(--space-24);
+        }
+        .topnav .brand {
+            font-weight: var(--fw-700);
+            font-size: 1rem;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: var(--space-8);
+            margin-right: var(--space-16);
+        }
+        .topnav .brand .cube-icon {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            background: var(--primary-blue);
+            border-radius: var(--radius-sm);
+            box-shadow: 0 0 16px var(--glow-blue);
+        }
+        .topnav .nav-links {
+            display: flex;
+            gap: var(--space-4);
+            list-style: none;
+        }
+        .topnav .nav-links a {
+            padding: 6px var(--space-16);
+            border-radius: var(--radius-sm);
+            font-size: 0.8125rem;
+            font-weight: var(--fw-500);
+            color: var(--text-secondary);
+            text-decoration: none;
+            transition: all var(--duration) var(--ease);
+        }
+        .topnav .nav-links a:hover {
+            color: var(--text-primary);
+            background: var(--surface-glass);
+        }
+        .topnav .nav-links a.active {
+            color: var(--primary-blue-dark);
+            background: var(--surface-glass-strong);
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3);
+        }
+        .topnav .nav-links a:focus-visible {
+            outline: 2px solid var(--primary-blue);
+            outline-offset: 2px;
+        }
+        .topnav .nav-actions {
+            margin-left: auto;
+            display: flex;
+            gap: var(--space-8);
+        }
+        .sidebar-demo {
+            display: flex;
+            gap: var(--space-32);
+            align-items: stretch;
+        }
+        .sidebar {
+            width: 220px;
+            border-radius: var(--radius-card);
+            background: rgba(15, 23, 42, 0.85);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(37, 99, 255, 0.25);
+            border-top-color: rgba(255, 255, 255, 0.15);
+            box-shadow: var(--shadow-level2), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+            padding: var(--space-16);
+            display: flex;
+            flex-direction: column;
+            gap: var(--space-4);
+        }
+        .sidebar .brand {
+            padding: var(--space-8) var(--space-12);
+            font-weight: var(--fw-700);
+            font-size: 0.875rem;
+            color: #fff;
+            display: flex;
+            align-items: center;
+            gap: var(--space-8);
+            margin-bottom: var(--space-12);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+            padding-bottom: var(--space-16);
+        }
+        .sidebar .brand .cube-icon {
+            width: 18px;
+            height: 18px;
+            background: var(--primary-blue);
+            border-radius: var(--radius-sm);
+            box-shadow: 0 0 16px var(--glow-blue);
+        }
+        .sidebar .nav-item {
+            display: flex;
+            align-items: center;
+            gap: var(--space-12);
+            padding: 8px var(--space-12);
+            border-radius: var(--radius-sm);
+            font-size: 0.8125rem;
+            font-weight: var(--fw-500);
+            color: rgba(255, 255, 255, 0.6);
+            text-decoration: none;
+            transition: all var(--duration) var(--ease);
+            cursor: pointer;
+            border: none;
+            background: transparent;
+            width: 100%;
+            font-family: var(--font);
+            text-align: left;
+        }
+        .sidebar .nav-item:hover {
+            color: #fff;
+            background: rgba(255, 255, 255, 0.06);
+        }
+        .sidebar .nav-item.active {
+            color: #fff;
+            background: var(--primary-blue-dark);
+            box-shadow: 0 0 24px rgba(37, 99, 255, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+        }
+        .sidebar .nav-item:focus-visible {
+            outline: 2px solid var(--primary-blue);
+            outline-offset: 2px;
+        }
+        .sidebar .nav-item .icon {
+            font-size: 1rem;
+            width: 20px;
+            text-align: center;
+        }
+        .sidebar .nav-item .badge {
+            margin-left: auto;
+            font-size: 0.6rem;
+            background: rgba(255, 255, 255, 0.1);
+            padding: 1px var(--space-8);
+            border-radius: 12px;
+            color: rgba(255, 255, 255, 0.5);
+        }
+        .sidebar .nav-item.active .badge {
+            background: rgba(255, 255, 255, 0.2);
+            color: rgba(255, 255, 255, 0.8);
+        }
+        .sidebar .divider {
+            border-color: rgba(255, 255, 255, 0.06);
+            margin: var(--space-8) 0;
+        }
+        .cube-badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: var(--space-6);
+            padding: 4px var(--space-12);
+            border-radius: var(--radius-sm);
+            background: var(--surface-glass);
+            backdrop-filter: blur(4px);
+            -webkit-backdrop-filter: blur(4px);
+            border: 1px solid var(--border-glass);
+            border-top-color: rgba(255, 255, 255, 0.6);
+            border-left-color: rgba(255, 255, 255, 0.25);
+            box-shadow: var(--shadow-level1), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+            font-size: 0.7rem;
+            font-weight: var(--fw-600);
+            color: var(--primary-blue-dark);
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            transition: all var(--duration) var(--ease);
+        }
+        .cube-badge .cube-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 2px;
+            background: var(--primary-blue);
+            box-shadow: 0 0 8px var(--glow-blue);
+            display: inline-block;
+        }
+        .cube-badge.primary {
+            background: var(--primary-blue-dark);
+            color: #fff;
+            border-color: var(--primary-blue-dark);
+            border-top-color: rgba(255, 255, 255, 0.3);
+            box-shadow: var(--shadow-level2), 0 0 20px rgba(37, 99, 255, 0.15);
+        }
+        .cube-badge.primary .cube-dot {
+            background: #fff;
+            box-shadow: 0 0 8px rgba(255, 255, 255, 0.3);
+        }
+        .cube-badge.outline {
+            background: transparent;
+            border: 1px solid var(--border-glass);
+        }
+        .cube-status {
+            display: inline-flex;
+            align-items: center;
+            gap: var(--space-8);
+            font-size: 0.8125rem;
+            font-weight: var(--fw-500);
+            color: var(--text-secondary);
+        }
+        .cube-status .cube-icon {
+            width: 14px;
+            height: 14px;
+            border-radius: var(--radius-sm);
+            display: inline-block;
+            transition: all var(--duration) var(--ease);
+        }
+        .cube-status .cube-icon.active {
+            background: var(--primary-blue);
+            box-shadow: 0 0 12px var(--glow-blue);
+        }
+        .cube-status .cube-icon.idle {
+            background: #CA8A04;
+            box-shadow: 0 0 12px rgba(234, 179, 8, 0.3);
+            opacity: 0.6;
+        }
+        .cube-status .cube-icon.offline {
+            background: #64748B;
+            box-shadow: none;
+            opacity: 0.3;
+        }
+        .cube-progress {
+            display: flex;
+            gap: var(--space-4);
+            align-items: center;
+        }
+        .cube-progress .cube-step {
+            width: 20px;
+            height: 20px;
+            border-radius: var(--radius-sm);
+            background: var(--surface-glass);
+            border: 1px solid var(--border-glass);
+            border-top-color: rgba(255, 255, 255, 0.3);
+            transition: all var(--duration) var(--ease);
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1);
+        }
+        .cube-progress .cube-step.filled {
+            background: var(--primary-blue);
+            border-color: var(--primary-blue);
+            box-shadow: 0 0 16px var(--glow-blue), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+        }
+        .cube-progress .cube-step.partial {
+            background: var(--surface-glass-strong);
+            border-color: var(--primary-blue);
+            box-shadow: inset 0 0 0 2px var(--primary-blue), 0 0 12px rgba(37, 99, 255, 0.1);
+        }
+        .cube-progress .cube-step.empty {
+            opacity: 0.3;
+        }
+        .cube-progress-label {
+            font-size: 0.7rem;
+            font-weight: var(--fw-500);
+            color: var(--text-secondary);
+            margin-left: var(--space-8);
+        }
+        .cube-metric {
+            padding: var(--space-24);
+            border-radius: var(--radius-card);
+            background: var(--surface-glass);
+            backdrop-filter: blur(4px);
+            -webkit-backdrop-filter: blur(4px);
+            border: 1px solid var(--border-glass);
+            border-top-color: rgba(255, 255, 255, 0.6);
+            border-left-color: rgba(255, 255, 255, 0.25);
+            box-shadow: var(--shadow-level1), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+            transition: all var(--duration) var(--ease);
+            min-width: 160px;
+        }
+        .cube-metric:hover {
+            box-shadow: var(--shadow-level2), inset 0 1px 0 rgba(255, 255, 255, 0.4);
+        }
+        .cube-metric .value {
+            font-size: 2.5rem;
+            font-weight: var(--fw-700);
+            letter-spacing: -0.02em;
+            color: var(--text-primary);
+            line-height: 1.1;
+        }
+        .cube-metric .label {
+            font-size: 0.7rem;
+            color: var(--text-secondary);
+            font-weight: var(--fw-500);
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            margin-top: var(--space-4);
+        }
+        .cube-metric .change {
+            font-size: 0.75rem;
+            font-weight: var(--fw-600);
+            margin-top: var(--space-8);
+            display: inline-flex;
+            align-items: center;
+            gap: var(--space-4);
+            padding: 2px var(--space-10);
+            border-radius: 12px;
+            background: rgba(21, 128, 61, 0.08);
+            color: #15803D;
+        }
+        .cube-metric .change.negative {
+            background: rgba(185, 28, 28, 0.08);
+            color: #B91C1C;
+        }
+        .cube-network {
+            display: flex;
+            flex-wrap: wrap;
+            gap: var(--space-12);
+            padding: var(--space-24);
+            border-radius: var(--radius-card);
+            background: var(--surface-glass);
+            backdrop-filter: blur(4px);
+            -webkit-backdrop-filter: blur(4px);
+            border: 1px solid var(--border-glass);
+            border-top-color: rgba(255, 255, 255, 0.6);
+            border-left-color: rgba(255, 255, 255, 0.25);
+            box-shadow: var(--shadow-level1), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+            min-height: 120px;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+        }
+        .cube-network .node {
+            width: 44px;
+            height: 44px;
+            border-radius: var(--radius-sm);
+            background: var(--surface-glass-strong);
+            border: 1px solid var(--border-glass);
+            border-top-color: rgba(255, 255, 255, 0.5);
+            box-shadow: var(--shadow-level1), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.6rem;
+            font-weight: var(--fw-600);
+            color: var(--text-secondary);
+            transition: all var(--duration) var(--ease);
+            position: relative;
+        }
+        .cube-network .node.active {
+            background: var(--primary-blue);
+            border-color: var(--primary-blue);
+            color: #fff;
+            box-shadow: 0 0 24px var(--glow-blue), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+        }
+        .cube-network .node .label {
+            position: absolute;
+            bottom: -20px;
+            font-size: 0.55rem;
+            color: var(--text-secondary);
+            white-space: nowrap;
+        }
+        .cube-network .connector {
+            width: 24px;
+            height: 2px;
+            background: var(--border-glass);
+            position: relative;
+            flex-shrink: 0;
+        }
+        .cube-network .connector::after {
+            content: '';
+            position: absolute;
+            right: -4px;
+            top: -3px;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--border-glass);
+        }
+        .cube-network .connector.active {
+            background: var(--primary-blue);
+            box-shadow: 0 0 12px var(--glow-blue);
+        }
+        .cube-network .connector.active::after {
+            background: var(--primary-blue);
+            box-shadow: 0 0 12px var(--glow-blue);
+        }
+        .bar-chart {
+            display: flex;
+            align-items: flex-end;
+            gap: var(--space-12);
+            height: 140px;
+            padding: var(--space-16) var(--space-8);
+            border-radius: var(--radius-default);
+            background: var(--surface-glass);
+            backdrop-filter: blur(4px);
+            -webkit-backdrop-filter: blur(4px);
+            border: 1px solid var(--border-glass);
+            border-top-color: rgba(255, 255, 255, 0.3);
+            box-shadow: var(--shadow-level1), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+        }
+        .bar-chart .bar {
+            flex: 1;
+            border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+            background: var(--surface-glass-strong);
+            border: 1px solid var(--border-glass);
+            border-bottom: none;
+            border-top-color: rgba(255, 255, 255, 0.3);
+            transition: all var(--duration) var(--ease);
+            min-height: 8px;
+            position: relative;
+        }
+        .bar-chart .bar.filled {
+            background: var(--primary-blue);
+            border-color: var(--primary-blue);
+            box-shadow: 0 0 20px var(--glow-blue), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+        }
+        .bar-chart .bar .bar-label {
+            position: absolute;
+            bottom: -20px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 0.55rem;
+            color: var(--text-secondary);
+            white-space: nowrap;
+        }
+        .scatter-chart {
+            display: flex;
+            flex-wrap: wrap;
+            gap: var(--space-8);
+            padding: var(--space-16);
+            border-radius: var(--radius-default);
+            background: var(--surface-glass);
+            backdrop-filter: blur(4px);
+            -webkit-backdrop-filter: blur(4px);
+            border: 1px solid var(--border-glass);
+            border-top-color: rgba(255, 255, 255, 0.3);
+            box-shadow: var(--shadow-level1), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+            min-height: 100px;
+            align-items: center;
+            justify-content: center;
+        }
+        .scatter-chart .dot {
+            width: 16px;
+            height: 16px;
+            border-radius: var(--radius-sm);
+            background: var(--primary-blue);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            box-shadow: 0 0 16px var(--glow-blue);
+            transition: all var(--duration) var(--ease);
+            opacity: 0.6;
+        }
+        .scatter-chart .dot:hover {
+            opacity: 1;
+            transform: scale(1.3);
+        }
+        .scatter-chart .dot.small {
+            width: 10px;
+            height: 10px;
+            opacity: 0.4;
+        }
+        .scatter-chart .dot.large {
+            width: 24px;
+            height: 24px;
+            opacity: 0.8;
+        }
+        .heatmap {
+            display: grid;
+            grid-template-columns: repeat(6, 1fr);
+            gap: var(--space-4);
+            padding: var(--space-16);
+            border-radius: var(--radius-default);
+            background: var(--surface-glass);
+            backdrop-filter: blur(4px);
+            -webkit-backdrop-filter: blur(4px);
+            border: 1px solid var(--border-glass);
+            border-top-color: rgba(255, 255, 255, 0.3);
+            box-shadow: var(--shadow-level1), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+            max-width: 320px;
+        }
+        .heatmap .tile {
+            aspect-ratio: 1;
+            border-radius: var(--radius-sm);
+            background: var(--surface-glass);
+            border: 1px solid var(--border-glass);
+            border-top-color: rgba(255, 255, 255, 0.2);
+            transition: all var(--duration) var(--ease);
+        }
+        .heatmap .tile.level-1 {
+            background: rgba(37, 99, 255, 0.08);
+            border-color: rgba(37, 99, 255, 0.10);
+        }
+        .heatmap .tile.level-2 {
+            background: rgba(37, 99, 255, 0.18);
+            border-color: rgba(37, 99, 255, 0.18);
+        }
+        .heatmap .tile.level-3 {
+            background: rgba(37, 99, 255, 0.35);
+            border-color: rgba(37, 99, 255, 0.30);
+        }
+        .heatmap .tile.level-4 {
+            background: rgba(37, 99, 255, 0.55);
+            border-color: rgba(37, 99, 255, 0.40);
+            box-shadow: 0 0 12px rgba(37, 99, 255, 0.10);
+        }
+        .heatmap .tile.level-5 {
+            background: var(--primary-blue);
+            border-color: var(--primary-blue);
+            box-shadow: 0 0 24px var(--glow-blue);
+        }
+        .heatmap .tile:hover {
+            transform: scale(1.05);
+            z-index: 1;
+        }
+        @media (max-width: 1024px) {
+            .grid-4 {
+                grid-template-columns: repeat(2, 1fr);
+            }
+            .grid-3 {
+                grid-template-columns: 1fr 1fr;
+            }
+        }
+        @media (max-width: 768px) {
+            body {
+                padding: var(--space-24);
+            }
+            .grid-2 {
+                grid-template-columns: 1fr;
+            }
+            .grid-3 {
+                grid-template-columns: 1fr;
+            }
+            .grid-4 {
+                grid-template-columns: 1fr 1fr;
+            }
+            .sidebar-demo {
+                flex-direction: column;
+            }
+            .sidebar {
+                width: 100%;
+            }
+            .topnav {
+                flex-wrap: wrap;
+            }
+            .topnav .nav-links {
+                flex-wrap: wrap;
+                gap: var(--space-4);
+            }
+            .topnav .nav-actions {
+                margin-left: 0;
+                width: 100%;
+                justify-content: flex-start;
+            }
+            .elevation-demo {
+                justify-content: center;
+            }
+            .swatches {
+                justify-content: center;
+            }
+            .cube-network {
+                flex-wrap: wrap;
+                justify-content: center;
+            }
+            .bar-chart {
+                height: 100px;
+            }
+            .heatmap {
+                max-width: 100%;
+            }
+        }
+        @media (max-width: 480px) {
+            .grid-4 {
+                grid-template-columns: 1fr;
+            }
+            .card .metric-value {
+                font-size: 1.75rem;
+            }
+            .cube-metric .value {
+                font-size: 2rem;
+            }
+        }
+        ::selection {
+            background: rgba(37, 99, 255, 0.2);
+            color: var(--text-primary);
+        }
+        .page-header {
+            margin-bottom: var(--space-48);
+            padding-bottom: var(--space-32);
+            border-bottom: 1px solid rgba(37, 99, 255, 0.08);
+        }
+        .page-header h1 {
+            font-size: 2.5rem;
+            font-weight: var(--fw-700);
+            letter-spacing: -0.03em;
+            background: linear-gradient(135deg, var(--text-primary) 0%, var(--primary-blue) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .page-header p {
+            font-size: 1.1rem;
+            color: var(--text-secondary);
+            max-width: 600px;
+            margin-top: var(--space-8);
+        }
+        .page-header .badge-row {
+            margin-top: var(--space-12);
+        }
+        @media (prefers-reduced-motion: reduce) {
+            *,
+            *::before,
+            *::after {
+                transition-duration: 0.01ms !important;
+                animation-duration: 0.01ms !important;
+            }
+        }
+        .skip-link {
+            position: absolute;
+            top: -1000px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: var(--primary-blue-dark);
+            color: #fff;
+            padding: var(--space-8) var(--space-16);
+            border-radius: var(--radius-default);
+            z-index: 1000;
+            font-weight: var(--fw-600);
+        }
+        .skip-link:focus {
+            top: var(--space-16);
+        }
+    </style>
+</head>
+<body>
+    <a href="#main" class="skip-link">Skip to main content</a>
+    <div class="container" id="main">
+        <header class="page-header">
+            <h1>⌗ Cube UI Kit</h1>
+            <p>Architectural Glass — engineered transparency for AI platforms, fintech, and cloud infrastructure.</p>
+            <div class="badge-row flex-row">
+                <span class="cube-badge" aria-label="version 2.0"><span class="cube-dot"></span> v2.0</span>
+                <span class="cube-badge outline">Inter · 500/600/700</span>
+                <span class="cube-badge outline">16 components</span>
+            </div>
+        </header>
+        <section class="section" aria-labelledby="color-system">
+            <h2 class="section-title" id="color-system">Color System <small>tokens</small></h2>
+            <div class="swatches">
+                <div class="swatch">
+                    <div class="swatch-color" style="background:#2563FF;"></div>
+                    <span class="swatch-label">Primary Blue<br/>#2563FF</span>
+                </div>
+                <div class="swatch">
+                    <div class="swatch-color" style="background:#0F3DCC;"></div>
+                    <span class="swatch-label">Deep Blue<br/>#0F3DCC</span>
+                </div>
+                <div class="swatch">
+                    <div class="swatch-color" style="background:rgba(37,99,255,0.10);border-color:rgba(37,99,255,0.2);"></div>
+                    <span class="swatch-label">Surface Glass<br/>rgba(37,99,255,0.10)</span>
+                </div>
+                <div class="swatch">
+                    <div class="swatch-color" style="background:rgba(37,99,255,0.18);border-color:rgba(37,99,255,0.3);"></div>
+                    <span class="swatch-label">Surface Strong<br/>rgba(37,99,255,0.18)</span>
+                </div>
+                <div class="swatch">
+                    <div class="swatch-color" style="background:rgba(37,99,255,0.35);border-color:rgba(37,99,255,0.5);"></div>
+                    <span class="swatch-label">Border Glass<br/>rgba(37,99,255,0.35)</span>
+                </div>
+                <div class="swatch">
+                    <div class="swatch-color" style="background:rgba(59,130,246,0.45);border-color:rgba(59,130,246,0.6);"></div>
+                    <span class="swatch-label">Glow Blue<br/>rgba(59,130,246,0.45)</span>
+                </div>
+                <div class="swatch">
+                    <div class="swatch-color" style="background:#F5F7FB;border-color:#E2E8F0;"></div>
+                    <span class="swatch-label">Background<br/>#F5F7FB</span>
+                </div>
+                <div class="swatch">
+                    <div class="swatch-color" style="background:#0F172A;border-color:#1E293B;"></div>
+                    <span class="swatch-label">Text Primary<br/>#0F172A</span>
+                </div>
+                <div class="swatch">
+                    <div class="swatch-color" style="background:#475569;border-color:#64748B;"></div>
+                    <span class="swatch-label">Text Secondary<br/>#475569</span>
+                </div>
+            </div>
+        </section>
+        <section class="section" aria-labelledby="foundation">
+            <h2 class="section-title" id="foundation">Foundation <small>radius · borders · elevation</small></h2>
+            <div class="flex-row" style="margin-bottom:var(--space-24);">
+                <span class="cube-badge outline" style="border-radius:6px;">6px small</span>
+                <span class="cube-badge outline" style="border-radius:10px;">10px default</span>
+                <span class="cube-badge outline" style="border-radius:14px;">14px card</span>
+                <span class="cube-badge outline" style="border-radius:18px;">18px hero</span>
+            </div>
+            <div class="elevation-demo">
+                <div class="elevation-box level1">Level 1</div>
+                <div class="elevation-box level2">Level 2</div>
+                <div class="elevation-box level3">Level 3</div>
+            </div>
+        </section>
+        <section class="section" aria-labelledby="buttons">
+            <h2 class="section-title" id="buttons">Buttons <small>glass + cube</small></h2>
+            <div class="flex-col gap-24">
+                <div class="flex-row">
+                    <button class="btn-glass">Default</button>
+                    <button class="btn-glass primary">Primary</button>
+                    <button class="btn-glass small">Small</button>
+                    <button class="btn-glass large">Large</button>
+                    <button class="btn-glass" disabled>Disabled</button>
+                </div>
+                <div class="flex-row">
+                    <button class="btn-cube" aria-label="Add">+</button>
+                    <button class="btn-cube primary" aria-label="Create">✦</button>
+                    <button class="btn-cube large" aria-label="Expand">⤡</button>
+                    <button class="btn-cube small" aria-label="AI action">⚡</button>
+                    <button class="btn-cube" disabled aria-label="Disabled" style="opacity:0.4;cursor:not-allowed;">⊗</button>
+                </div>
+            </div>
+        </section>
+        <section class="section" aria-labelledby="inputs">
+            <h2 class="section-title" id="inputs">Inputs <small>glass fields</small></h2>
+            <div class="grid-2">
+                <div class="input-group">
+                    <label for="email">Email</label>
+                    <div class="input-field">
+                        <span class="icon" aria-hidden="true">✉</span>
+                        <input type="email" id="email" placeholder="you@company.com" />
+                    </div>
+                    <span class="input-helper">We'll never share your email.</span>
+                </div>
+                <div class="input-group">
+                    <label for="password">Password</label>
+                    <div class="input-field error">
+                        <span class="icon" aria-hidden="true">🔒</span>
+                        <input type="password" id="password" placeholder="••••••••" value="wrong" />
+                    </div>
+                    <span class="input-helper error">Invalid credentials</span>
+                </div>
+                <div class="input-group">
+                    <label for="search">Search</label>
+                    <div class="input-field">
+                        <span class="icon" aria-hidden="true">🔍</span>
+                        <input type="text" id="search" placeholder="Search..." />
+                    </div>
+                </div>
+                <div class="input-group">
+                    <label for="project">Project name</label>
+                    <div class="input-field" style="border-color:var(--primary-blue);box-shadow:0 0 0 3px rgba(37,99,255,0.12);">
+                        <span class="icon" aria-hidden="true">📁</span>
+                        <input type="text" id="project" placeholder="Project name" value="Cube Dashboard" />
+                    </div>
+                </div>
+            </div>
+        </section>
+        <section class="section" aria-labelledby="cards">
+            <h2 class="section-title" id="cards">Cards <small>glass blocks</small></h2>
+            <div class="grid-3">
+                <div class="card">
+                    <div class="card-header">
+                        <span class="title">📊 Analytics</span>
+                        <button class="action">View →</button>
+                    </div>
+                    <div class="card-body">
+                        <div class="metric-value">42.8K</div>
+                        <div style="display:flex;align-items:center;gap:var(--space-12);margin-top:var(--space-4);">
+                            <span class="metric-change">↑ +18%</span>
+                            <span class="metric-label">vs last month</span>
+                        </div>
+                    </div>
+                    <div class="card-footer">Updated 2 min ago</div>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <span class="title">📈 Revenue</span>
+                        <button class="action">Export</button>
+                    </div>
+                    <div class="card-body">
+                        <div class="metric-value">$12.4M</div>
+                        <div style="display:flex;align-items:center;gap:var(--space-12);margin-top:var(--space-4);">
+                            <span class="metric-change negative">↓ -3.2%</span>
+                            <span class="metric-label">vs last quarter</span>
+                        </div>
+                    </div>
+                    <div class="card-footer">Forecast: $14.1M</div>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <span class="title">🧊 Active Nodes</span>
+                        <button class="action">Details</button>
+                    </div>
+                    <div class="card-body">
+                        <div class="metric-value">284</div>
+                        <div style="display:flex;align-items:center;gap:var(--space-12);margin-top:var(--space-4);">
+                            <span class="metric-change">↑ +12</span>
+                            <span class="metric-label">online</span>
+                        </div>
+                    </div>
+                    <div class="card-footer">98.7% uptime</div>
+                </div>
+            </div>
+        </section>
+        <section class="section" aria-labelledby="table">
+            <h2 class="section-title" id="table">Data Table <small>layered rows</small></h2>
+            <div class="table-wrap" role="table" aria-label="Node status table">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th scope="col">Node</th>
+                            <th scope="col">Status</th>
+                            <th scope="col">Uptime</th>
+                            <th scope="col">Load</th>
+                            <th scope="col">Region</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>cube-01</strong></td>
+                            <td><span class="status-badge active"><span class="dot" aria-hidden="true"></span> Active</span></td>
+                            <td>99.8%</td>
+                            <td>42%</td>
+                            <td>us-east</td>
+                        </tr>
+                        <tr class="selected">
+                            <td><strong>cube-02</strong></td>
+                            <td><span class="status-badge active"><span class="dot" aria-hidden="true"></span> Active</span></td>
+                            <td>99.1%</td>
+                            <td>68%</td>
+                            <td>eu-west</td>
+                        </tr>
+                        <tr>
+                            <td><strong>cube-03</strong></td>
+                            <td><span class="status-badge idle"><span class="dot" aria-hidden="true"></span> Idle</span></td>
+                            <td>87.3%</td>
+                            <td>12%</td>
+                            <td>ap-south</td>
+                        </tr>
+                        <tr>
+                            <td><strong>cube-04</strong></td>
+                            <td><span class="status-badge offline"><span class="dot" aria-hidden="true"></span> Offline</span></td>
+                            <td>0%</td>
+                            <td>—</td>
+                            <td>us-west</td>
+                        </tr>
+                        <tr>
+                            <td><strong>cube-05</strong></td>
+                            <td><span class="status-badge active"><span class="dot" aria-hidden="true"></span> Active</span></td>
+                            <td>99.4%</td>
+                            <td>23%</td>
+                            <td>eu-north</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <div style="margin-top:var(--space-12);font-size:0.7rem;color:var(--text-secondary);">
+                Row hover → left edge glow &nbsp;·&nbsp; Selected row → strong border + soft glow
+            </div>
+        </section>
+        <section class="section" aria-labelledby="navigation">
+            <h2 class="section-title" id="navigation">Navigation <small>top + sidebar</small></h2>
+            <nav class="topnav" aria-label="Main navigation">
+                <div class="brand">
+                    <span class="cube-icon" aria-hidden="true"></span>
+                    Cube
+                </div>
+                <ul class="nav-links">
+                    <li><a href="#" class="active" aria-current="page">Dashboard</a></li>
+                    <li><a href="#">Analytics</a></li>
+                    <li><a href="#">Nodes</a></li>
+                    <li><a href="#">Settings</a></li>
+                </ul>
+                <div class="nav-actions">
+                    <button class="btn-cube small" aria-label="Add">+</button>
+                    <button class="btn-glass small">Connect</button>
+                </div>
+            </nav>
+            <div class="sidebar-demo">
+                <nav class="sidebar" aria-label="Side navigation">
+                    <div class="brand">
+                        <span class="cube-icon" aria-hidden="true"></span>
+                        Cube OS
+                    </div>
+                    <button class="nav-item active" aria-current="page">
+                        <span class="icon" aria-hidden="true">◆</span> Dashboard
+                        <span class="badge">12</span>
+                    </button>
+                    <button class="nav-item">
+                        <span class="icon" aria-hidden="true">◈</span> Analytics
+                    </button>
+                    <button class="nav-item">
+                        <span class="icon" aria-hidden="true">▣</span> Nodes
+                        <span class="badge">4</span>
+                    </button>
+                    <button class="nav-item">
+                        <span class="icon" aria-hidden="true">⊞</span> Workflows
+                    </button>
+                    <hr class="divider" />
+                    <button class="nav-item">
+                        <span class="icon" aria-hidden="true">⚙</span> Settings
+                    </button>
+                    <button class="nav-item">
+                        <span class="icon" aria-hidden="true">⇤</span> Logout
+                    </button>
+                </nav>
+                <div style="flex:1;border-radius:var(--radius-card);background:var(--surface-glass);border:1px solid var(--border-glass);border-top-color:rgba(255,255,255,0.3);padding:var(--space-24);display:flex;align-items:center;justify-content:center;color:var(--text-secondary);font-size:0.875rem;">
+                    <span>Main content area — active item becomes a solid cube chip</span>
+                </div>
+            </div>
+        </section>
+        <section class="section" aria-labelledby="cube-components">
+            <h2 class="section-title" id="cube-components">Cube Components <small>badge · status · progress</small></h2>
+            <div class="grid-3">
+                <div class="flex-col">
+                    <span class="label">Cube Badge</span>
+                    <div class="flex-row">
+                        <span class="cube-badge"><span class="cube-dot"></span> AI</span>
+                        <span class="cube-badge primary"><span class="cube-dot"></span> New</span>
+                        <span class="cube-badge outline">Beta</span>
+                        <span class="cube-badge primary" style="background:var(--deep-blue);">Verified</span>
+                    </div>
+                </div>
+                <div class="flex-col">
+                    <span class="label">Cube Status</span>
+                    <div class="flex-row">
+                        <span class="cube-status"><span class="cube-icon active" aria-hidden="true"></span> Active</span>
+                        <span class="cube-status"><span class="cube-icon idle" aria-hidden="true"></span> Idle</span>
+                        <span class="cube-status"><span class="cube-icon offline" aria-hidden="true"></span> Offline</span>
+                    </div>
+                </div>
+                <div class="flex-col">
+                    <span class="label">Cube Progress</span>
+                    <div class="flex-row">
+                        <div class="cube-progress" role="progressbar" aria-valuenow="3.5" aria-valuemin="0" aria-valuemax="5" aria-label="Progress 3.5 out of 5">
+                            <span class="cube-step filled"></span>
+                            <span class="cube-step filled"></span>
+                            <span class="cube-step filled"></span>
+                            <span class="cube-step partial"></span>
+                            <span class="cube-step empty"></span>
+                            <span class="cube-progress-label">3.5 / 5</span>
+                        </div>
+                    </div>
+                    <div class="flex-row">
+                        <div class="cube-progress" role="progressbar" aria-valuenow="2" aria-valuemin="0" aria-valuemax="5" aria-label="Progress 2 out of 5">
+                            <span class="cube-step filled"></span>
+                            <span class="cube-step filled"></span>
+                            <span class="cube-step empty"></span>
+                            <span class="cube-step empty"></span>
+                            <span class="cube-step empty"></span>
+                            <span class="cube-progress-label">2 / 5</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+        <section class="section" aria-labelledby="widgets">
+            <h2 class="section-title" id="widgets">Dashboard Widgets <small>cube metric + network</small></h2>
+            <div class="grid-2" style="margin-bottom:var(--space-24);">
+                <div class="cube-metric">
+                    <div class="value">1,284</div>
+                    <div class="label">Total Requests</div>
+                    <div class="change">↑ +12.4%</div>
+                </div>
+                <div class="cube-metric">
+                    <div class="value">98.7%</div>
+                    <div class="label">Uptime</div>
+                    <div class="change" style="background:rgba(234,179,8,0.08);color:#CA8A04;">● Stable</div>
+                </div>
+                <div class="cube-metric">
+                    <div class="value">42</div>
+                    <div class="label">Active Workflows</div>
+                    <div class="change">↑ +3</div>
+                </div>
+                <div class="cube-metric">
+                    <div class="value">7.2ms</div>
+                    <div class="label">Avg Latency</div>
+                    <div class="change negative">↑ +0.8ms</div>
+                </div>
+            </div>
+            <span class="label" style="display:block;margin-bottom:var(--space-8);">Cube Network — system status</span>
+            <div class="cube-network" role="img" aria-label="Network diagram showing connected nodes: API, DB, Cache, Queue, Worker">
+                <div class="node active">API</div>
+                <div class="connector active"></div>
+                <div class="node active">DB</div>
+                <div class="connector active"></div>
+                <div class="node">Cache</div>
+                <div class="connector"></div>
+                <div class="node active">Queue</div>
+                <div class="connector active"></div>
+                <div class="node active">Worker</div>
+                <div style="width:100%;display:flex;justify-content:center;gap:var(--space-24);margin-top:var(--space-16);">
+                    <span style="font-size:0.6rem;color:var(--text-secondary);display:flex;align-items:center;gap:4px;">
+                        <span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--primary-blue);box-shadow:0 0 8px var(--glow-blue);"></span> Active
+                    </span>
+                    <span style="font-size:0.6rem;color:var(--text-secondary);display:flex;align-items:center;gap:4px;">
+                        <span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--surface-glass-strong);border:1px solid var(--border-glass);"></span> Idle
+                    </span>
+                    <span style="font-size:0.6rem;color:var(--text-secondary);display:flex;align-items:center;gap:4px;">
+                        <span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:rgba(37,99,255,0.08);border:1px dashed var(--border-glass);"></span> Disconnected
+                    </span>
+                </div>
+            </div>
+        </section>
+        <section class="section" aria-labelledby="charts">
+            <h2 class="section-title" id="charts">Charts <small>cube geometry</small></h2>
+            <div class="grid-3">
+                <div>
+                    <span class="label" style="display:block;margin-bottom:var(--space-8);">Bar Chart — prism bars</span>
+                    <div class="bar-chart" role="img" aria-label="Bar chart with values for days of the week">
+                        <div class="bar filled" style="height:90%;"><span class="bar-label">M</span></div>
+                        <div class="bar filled" style="height:60%;"><span class="bar-label">T</span></div>
+                        <div class="bar filled" style="height:100%;"><span class="bar-label">W</span></div>
+                        <div class="bar filled" style="height:45%;"><span class="bar-label">T</span></div>
+                        <div class="bar filled" style="height:75%;"><span class="bar-label">F</span></div>
+                        <div class="bar" style="height:30%;"><span class="bar-label">S</span></div>
+                        <div class="bar" style="height:15%;"><span class="bar-label">S</span></div>
+                    </div>
+                </div>
+                <div>
+                    <span class="label" style="display:block;margin-bottom:var(--space-8);">Scatter — glowing cubes</span>
+                    <div class="scatter-chart" role="img" aria-label="Scatter plot with glowing cube data points">
+                        <span class="dot small"></span>
+                        <span class="dot"></span>
+                        <span class="dot large"></span>
+                        <span class="dot small"></span>
+                        <span class="dot"></span>
+                        <span class="dot small"></span>
+                        <span class="dot large"></span>
+                        <span class="dot"></span>
+                        <span class="dot small"></span>
+                        <span class="dot"></span>
+                        <span class="dot small"></span>
+                        <span class="dot large"></span>
+                        <span class="dot"></span>
+                        <span class="dot small"></span>
+                        <span class="dot"></span>
+                        <span class="dot small"></span>
+                        <span class="dot"></span>
+                        <span class="dot large"></span>
+                        <span class="dot small"></span>
+                        <span class="dot"></span>
+                    </div>
+                </div>
+                <div>
+                    <span class="label" style="display:block;margin-bottom:var(--space-8);">Heatmap — cube tiles</span>
+                    <div class="heatmap" role="img" aria-label="Heatmap showing data density with cube tiles">
+                        <div class="tile level-1"></div>
+                        <div class="tile level-3"></div>
+                        <div class="tile level-2"></div>
+                        <div class="tile level-5"></div>
+                        <div class="tile level-4"></div>
+                        <div class="tile level-1"></div>
+                        <div class="tile level-2"></div>
+                        <div class="tile level-4"></div>
+                        <div class="tile level-1"></div>
+                        <div class="tile level-3"></div>
+                        <div class="tile level-5"></div>
+                        <div class="tile level-2"></div>
+                        <div class="tile level-3"></div>
+                        <div class="tile level-1"></div>
+                        <div class="tile level-4"></div>
+                        <div class="tile level-2"></div>
+                        <div class="tile level-1"></div>
+                        <div class="tile level-3"></div>
+                        <div class="tile level-5"></div>
+                        <div class="tile level-4"></div>
+                        <div class="tile level-2"></div>
+                        <div class="tile level-1"></div>
+                        <div class="tile level-3"></div>
+                        <div class="tile level-2"></div>
+                        <div class="tile level-4"></div>
+                        <div class="tile level-5"></div>
+                        <div class="tile level-1"></div>
+                        <div class="tile level-3"></div>
+                        <div class="tile level-2"></div>
+                        <div class="tile level-4"></div>
+                        <div class="tile level-3"></div>
+                        <div class="tile level-2"></div>
+                        <div class="tile level-5"></div>
+                        <div class="tile level-1"></div>
+                        <div class="tile level-4"></div>
+                        <div class="tile level-3"></div>
+                    </div>
+                </div>
+            </div>
+        </section>
+        <hr class="divider" />
+        <footer style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:var(--space-16);padding:var(--space-16) 0;">
+            <span style="font-size:0.75rem;color:var(--text-secondary);">
+                ⌗ Cube UI Kit — Architectural Glass · Built with <span style="color:var(--primary-blue);">◈</span> precision
+            </span>
+            <div class="flex-row">
+                <span class="cube-badge outline" style="font-size:0.6rem;">Inter</span>
+                <span class="cube-badge outline" style="font-size:0.6rem;">16 components</span>
+                <span class="cube-badge outline" style="font-size:0.6rem;">v2.0</span>
+            </div>
+        </footer>
+    </div>
+</body>
+</html>

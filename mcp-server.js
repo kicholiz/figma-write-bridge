@@ -812,6 +812,9 @@ const ALLOWED_MCP_TOOLS = new Set([
   "remove_animation_style",
   "set_timeline_duration",
   "list_shaders",
+  "import_shader_by_id",
+  "apply_shader",
+  "get_font_variation_axes",
   "read_my_design",
   "figma_set_text",
   "figma_set_solid_fill",
@@ -1312,18 +1315,18 @@ server.registerTool(
   "get_document_tree",
   {
     title: "Get document tree",
-    description: "Compact structural tree of the whole document (or a subtree) for full-context reads. Returns a flattened columnar table: fields lists the column names, rows holds one array per node in pre-order, and the depth column gives nesting level (depth 0 is the root, each +1 is a child of the nearest preceding row with depth-1). Every node is {id, name, type}; no extra fields unless requested. Default maxDepth is 3 (bounded output); pass a larger maxDepth for deeper expansion and fields: [\"characters\"] to include TEXT content. Options: rootNodeId (default whole file), maxDepth, excludeTypes (e.g. [\"VECTOR\"]), fields (extra per-node fields: characters, fills, strokes, absoluteBoundingBox, strokeWeight, cornerRadius, fillStyleId, strokeStyleId, textStyleId, layoutMode, itemSpacing, padding, visible, opacity), includeHidden (default true), verbose (return the original nested tree instead).",
+    description: "Compact structural tree of the whole document (or a subtree). Returns a flattened columnar table: fields lists the column names, rows holds one array per node in pre-order, and the depth column gives nesting level (depth 0 is the root, each +1 is a child of the nearest preceding row with depth-1). Every node is {id, name, type}; no extra fields unless requested. Default maxDepth is 3. Hidden layers are omitted unless includeHidden is true. Pass fields to pull extra per-node values (characters, fills, fillHex, fillCount, strokes, x, y, width, height, absoluteBoundingBox, strokeWeight, cornerRadius, fillStyleId, strokeStyleId, textStyleId, layoutMode, layoutWrap, layoutSizingHorizontal, layoutSizingVertical, layoutPositioning, primaryAxisAlignItems, counterAxisAlignItems, layoutGrow, itemSpacing, padding, visible, opacity). Use rootNodeId to scope to a frame/page and excludeTypes (e.g. [\"VECTOR\"]) to drop icon noise. verbose returns the nested tree instead.",
     inputSchema: {
       rootNodeId: z.string().optional(),
       maxDepth: z.number().int().min(0).optional().describe("Levels of children to expand. Default 3. Omit for compact overview."),
       excludeTypes: z.array(z.string()).optional(),
       fields: z.array(z.string()).optional().describe("Extra per-node fields. Add \"characters\" to include TEXT content."),
-      includeHidden: z.boolean().optional(),
+      includeHidden: z.boolean().optional().describe("Include hidden layers. Default false."),
       verbose: z.boolean().optional().describe("Return the nested {..., children:[...]} tree instead of the flattened columnar table.")
     }
   },
   async ({ rootNodeId, maxDepth, excludeTypes, fields, includeHidden, verbose }) => {
-    const result = await sendCommand("get_document_tree", { rootNodeId, maxDepth, excludeTypes, fields, includeHidden });
+    const result = await sendCommand("get_document_tree", { rootNodeId, maxDepth, excludeTypes, fields, includeHidden: includeHidden ?? false });
     if (verbose || !result || !result.tree) {
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     }
@@ -1350,17 +1353,23 @@ server.registerTool(
   "create_rectangle",
   {
     title: "Create rectangle",
-    description: "Create a new rectangle with position, size, and optional name.",
+    description:
+      "Create a rectangle. Pass parentNodeId to insert into a frame, auto-layout stack, or slot. Inside auto layout, omit x/y and use index + layoutSizing; x/y only apply to freeform frames or ignoreAutoLayout overlays.",
     inputSchema: {
       name: z.string().optional(),
-      x: z.number().optional(),
+      x: z.number().optional().describe("Parent-relative x. Ignored inside auto layout unless ignoreAutoLayout is true."),
       y: z.number().optional(),
       width: z.number().optional(),
-      height: z.number().optional()
+      height: z.number().optional(),
+      parentNodeId: z.string().optional(),
+      index: z.number().optional().describe("Child index inside the parent. Use this to order items in auto layout."),
+      ignoreAutoLayout: z.boolean().optional().describe("If true, overlay with absolute x/y inside an auto-layout parent."),
+      layoutSizingHorizontal: z.string().optional().describe("FIXED | HUG | FILL"),
+      layoutSizingVertical: z.string().optional().describe("FIXED | HUG | FILL")
     }
   },
-  async ({ name, x, y, width, height }) => {
-    const result = await sendCommand("create_rectangle", { name, x, y, width, height });
+  async (args) => {
+    const result = await sendCommand("create_rectangle", args);
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -1369,17 +1378,30 @@ server.registerTool(
   "create_frame",
   {
     title: "Create frame",
-    description: "Create a new frame with position, size, and optional name.",
+    description:
+      "Create a new frame. Defaults to NO fill (transparent) — Figma's native white fill is cleared so layout containers stay invisible. Pass fillHex only when the frame is a visible surface (card, screen bg, chip). Nested into auto layout: omit x/y and omit width/height (do not ship at 320×200); pass parentNodeId + index + layoutSizing. Optional layoutMode (HORIZONTAL|VERTICAL|GRID).",
     inputSchema: {
       name: z.string().optional(),
-      x: z.number().optional(),
+      x: z.number().optional().describe("Parent-relative x. Ignored inside auto layout unless ignoreAutoLayout is true."),
       y: z.number().optional(),
-      width: z.number().optional(),
-      height: z.number().optional()
+      width: z.number().optional().describe("Omit for nested auto-layout wrappers so they hug/fill instead of shipping at 320×200."),
+      height: z.number().optional(),
+      parentNodeId: z.string().optional(),
+      index: z.number().optional().describe("Child index inside the parent. Use this to order items in auto layout."),
+      ignoreAutoLayout: z.boolean().optional().describe("If true, overlay with absolute x/y inside an auto-layout parent."),
+      fillHex: z.string().optional().describe("Solid fill hex like #FFFFFF. Omit for transparent layout containers."),
+      r: z.number().optional(),
+      g: z.number().optional(),
+      b: z.number().optional(),
+      opacity: z.number().optional(),
+      keepDefaultFill: z.boolean().optional().describe("If true, keep Figma's default white fill. Prefer omitting fills instead."),
+      layoutMode: z.string().optional().describe("NONE | HORIZONTAL | VERTICAL | GRID"),
+      layoutSizingHorizontal: z.string().optional().describe("FIXED | HUG | FILL"),
+      layoutSizingVertical: z.string().optional().describe("FIXED | HUG | FILL")
     }
   },
-  async ({ name, x, y, width, height }) => {
-    const result = await sendCommand("create_frame", { name, x, y, width, height });
+  async (args) => {
+    const result = await sendCommand("create_frame", args);
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -1388,17 +1410,33 @@ server.registerTool(
   "create_text",
   {
     title: "Create text",
-    description: "Create a new text node.",
+    description:
+      "Create a text node. Defaults to auto-width hug (textAutoResize WIDTH_AND_HEIGHT + HUG sizing). Pass parentNodeId to insert into a frame/stack/slot — inside auto layout omit x/y and use index. Pass textAlignHorizontal (LEFT|CENTER|RIGHT|JUSTIFIED), textAlignVertical (TOP|CENTER|BOTTOM), textAutoResize (WIDTH_AND_HEIGHT|HEIGHT|NONE|TRUNCATE), and layoutSizingHorizontal/Vertical (FIXED|HUG|FILL). For variable fonts, pass variationSettings (e.g. {wght:550}) and optionally omit fontStyle.",
     inputSchema: {
       characters: z.string(),
       name: z.string().optional(),
       x: z.number().optional(),
       y: z.number().optional(),
-      fontSize: z.number().optional()
+      fontSize: z.number().optional(),
+      fontFamily: z.string().optional(),
+      fontStyle: z.string().optional(),
+      variationSettings: z.record(z.number()).optional().describe("Variable-font axis values keyed by OpenType tag, e.g. { wght: 550, slnt: -10 }. Omit fontStyle to let Figma pick the matching named instance."),
+      parentNodeId: z.string().optional(),
+      index: z.number().optional().describe("Child index inside the parent. Use this to order items in auto layout."),
+      ignoreAutoLayout: z.boolean().optional().describe("If true, overlay with absolute x/y inside an auto-layout parent."),
+      textAlignHorizontal: z.string().optional().describe("LEFT | CENTER | RIGHT | JUSTIFIED"),
+      textAlignVertical: z.string().optional().describe("TOP | CENTER | BOTTOM"),
+      textAutoResize: z.string().optional().describe("WIDTH_AND_HEIGHT (default hug) | HEIGHT (wrap+auto height) | NONE (fixed) | TRUNCATE"),
+      layoutSizingHorizontal: z.string().optional().describe("FIXED | HUG | FILL"),
+      layoutSizingVertical: z.string().optional().describe("FIXED | HUG | FILL"),
+      fillsHex: z.string().optional(),
+      r: z.number().optional(),
+      g: z.number().optional(),
+      b: z.number().optional()
     }
   },
-  async ({ characters, name, x, y, fontSize }) => {
-    const result = await sendCommand("create_text", { characters, name, x, y, fontSize });
+  async (args) => {
+    const result = await sendCommand("create_text", args);
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -1407,23 +1445,20 @@ server.registerTool(
   "set_fill_color",
   {
     title: "Set fill color",
-    description: "Set the fill color of a node (RGB can be 0..1 or 0..255).",
+    description:
+      "Set or clear a node's solid fill. Prefer applying styles/variables when available. Pass clear:true (or fills:[]) to remove fills from layout containers that should be transparent. Also accepts fillHex.",
     inputSchema: {
       nodeId: z.string(),
-      r: z.number(),
-      g: z.number(),
-      b: z.number(),
-      opacity: z.number().optional()
+      r: z.number().optional(),
+      g: z.number().optional(),
+      b: z.number().optional(),
+      opacity: z.number().optional(),
+      fillHex: z.string().optional(),
+      clear: z.boolean().optional().describe("Remove all fills (transparent).")
     }
   },
-  async ({ nodeId, r, g, b, opacity }) => {
-    const result = await sendCommand("set_fill_color", {
-      nodeId,
-      r,
-      g,
-      b,
-      opacity
-    });
+  async (args) => {
+    const result = await sendCommand("set_fill_color", args);
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -1432,15 +1467,16 @@ server.registerTool(
   "read_my_design",
   {
     title: "Read my design",
-    description: "Get detailed node information about the current selection.",
+    description: "Compact layout-aware summary of the current selection. Default fields cover size, auto-layout (mode, hug/fill, padding, gap, alignment), fillHex/fillCount, and truncated text. VECTOR children are omitted unless you pass excludeTypes: []. Pass verbose for the raw REST dump. Use instead of chaining get_selection when you only need structure.",
     inputSchema: {
       maxDepth: z.number().int().min(0).optional().describe("Levels of children to expand. Defaults to 0 (node itself)."),
-      excludeTypes: z.array(z.string()).optional().describe("Skip these node types, e.g. [\"VECTOR\"], to cut icon/vector noise."),
-      fields: z.array(z.string()).optional().describe("Only return these fields (plus id/name/type).")
+      excludeTypes: z.array(z.string()).optional().describe("Skip these node types. Default skips VECTOR children; pass [] to include them."),
+      fields: z.array(z.string()).optional().describe("Replace the compact default with only these fields (plus id/name/type)."),
+      verbose: z.boolean().optional().describe("Return the raw JSON_REST_V1 dump instead of the compact layout summary.")
     }
   },
-  async ({ maxDepth, excludeTypes, fields }) => {
-    const result = await sendCommand("read_my_design", { maxDepth: maxDepth ?? 0, excludeTypes, fields });
+  async ({ maxDepth, excludeTypes, fields, verbose }) => {
+    const result = await sendCommand("read_my_design", { maxDepth: maxDepth ?? 0, excludeTypes, fields, verbose });
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -1449,16 +1485,17 @@ server.registerTool(
   "get_node_info",
   {
     title: "Get node info",
-    description: "Get detailed information about a specific node.",
+    description: "Compact layout-aware summary of a node: size, auto-layout (mode, hug/fill, positioning, padding, gap, alignment), fillHex/fillCount, truncated text, and childCount. VECTOR children are omitted unless excludeTypes is []. Default maxDepth is 0 (the node itself). Pass fields to request a subset, or verbose for the raw REST dump.",
     inputSchema: {
       nodeId: z.string(),
       maxDepth: z.number().int().min(0).optional().describe("Levels of children to expand. Defaults to 0 (node itself)."),
-      excludeTypes: z.array(z.string()).optional().describe("Skip these node types, e.g. [\"VECTOR\"], to cut icon/vector noise."),
-      fields: z.array(z.string()).optional().describe("Only return these fields (plus id/name/type).")
+      excludeTypes: z.array(z.string()).optional().describe("Skip these node types. Default skips VECTOR children; pass [] to include them."),
+      fields: z.array(z.string()).optional().describe("Replace the compact default with only these fields (plus id/name/type)."),
+      verbose: z.boolean().optional().describe("Return the raw JSON_REST_V1 dump instead of the compact layout summary.")
     }
   },
-  async ({ nodeId, maxDepth, excludeTypes, fields }) => {
-    const result = await sendCommand("get_node_info", { nodeId, maxDepth: maxDepth ?? 0, excludeTypes, fields });
+  async ({ nodeId, maxDepth, excludeTypes, fields, verbose }) => {
+    const result = await sendCommand("get_node_info", { nodeId, maxDepth: maxDepth ?? 0, excludeTypes, fields, verbose });
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -1467,16 +1504,17 @@ server.registerTool(
   "get_nodes_info",
   {
     title: "Get nodes info",
-    description: "Get detailed information about multiple nodes by providing an array of node IDs.",
+    description: "Compact layout-aware summaries for several nodes. Same defaults as get_node_info. Prefer this over looping get_node_info.",
     inputSchema: {
       nodeIds: z.array(z.string()),
       maxDepth: z.number().int().min(0).optional().describe("Levels of children to expand. Defaults to 0 (node itself)."),
-      excludeTypes: z.array(z.string()).optional().describe("Skip these node types, e.g. [\"VECTOR\"], to cut icon/vector noise."),
-      fields: z.array(z.string()).optional().describe("Only return these fields (plus id/name/type).")
+      excludeTypes: z.array(z.string()).optional().describe("Skip these node types. Default skips VECTOR children; pass [] to include them."),
+      fields: z.array(z.string()).optional().describe("Replace the compact default with only these fields (plus id/name/type)."),
+      verbose: z.boolean().optional().describe("Return the raw JSON_REST_V1 dump instead of the compact layout summary.")
     }
   },
-  async ({ nodeIds, maxDepth, excludeTypes, fields }) => {
-    const result = await sendCommand("get_nodes_info", { nodeIds, maxDepth: maxDepth ?? 0, excludeTypes, fields });
+  async ({ nodeIds, maxDepth, excludeTypes, fields, verbose }) => {
+    const result = await sendCommand("get_nodes_info", { nodeIds, maxDepth: maxDepth ?? 0, excludeTypes, fields, verbose });
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -1485,15 +1523,16 @@ server.registerTool(
   "get_selection_context",
   {
     title: "Get selection context",
-    description: "One-call bundle for the current selection: node info + (for instances) main component id, property definitions/values, slots. Use instead of chaining get_selection→get_node_info→get_component_property_definitions.",
+    description: "One-call bundle for the current selection: compact layout-aware node info plus (for instances) main component id, property definitions/values, and slots. Use instead of chaining get_selection→get_node_info→get_component_property_definitions.",
     inputSchema: {
       maxDepth: z.number().int().min(0).optional().describe("Levels of children to expand. Defaults to 0 (node itself)."),
-      excludeTypes: z.array(z.string()).optional().describe("Skip these node types, e.g. [\"VECTOR\"], to cut noise."),
-      fields: z.array(z.string()).optional().describe("Only return these fields (plus id/name/type).")
+      excludeTypes: z.array(z.string()).optional().describe("Skip these node types. Default skips VECTOR children; pass [] to include them."),
+      fields: z.array(z.string()).optional().describe("Replace the compact default with only these fields (plus id/name/type)."),
+      verbose: z.boolean().optional().describe("Use the raw REST dump for the node summary.")
     }
   },
-  async ({ maxDepth, excludeTypes, fields }) => {
-    const result = await sendCommand("get_selection_context", { maxDepth, excludeTypes, fields });
+  async ({ maxDepth, excludeTypes, fields, verbose }) => {
+    const result = await sendCommand("get_selection_context", { maxDepth, excludeTypes, fields, verbose });
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -1584,16 +1623,20 @@ server.registerTool(
   "create_instance_from_component_key",
   {
     title: "Create instance from component key",
-    description: "Create an instance from a library component key inside the target frame/parent.",
+    description: "Create an instance from a library component key inside the target frame/parent. Pass parentNodeId + index for auto-layout stacks; omit x/y unless the parent is freeform.",
     inputSchema: {
       componentKey: z.string(),
       parentNodeId: z.string().optional(),
       x: z.number().optional(),
-      y: z.number().optional()
+      y: z.number().optional(),
+      index: z.number().optional(),
+      ignoreAutoLayout: z.boolean().optional(),
+      layoutSizingHorizontal: z.string().optional().describe("FIXED | HUG | FILL"),
+      layoutSizingVertical: z.string().optional().describe("FIXED | HUG | FILL")
     }
   },
-  async ({ componentKey, parentNodeId, x, y }) => {
-    const result = await sendCommand("create_instance_from_component_key", { componentKey, parentNodeId, x, y });
+  async (args) => {
+    const result = await sendCommand("create_instance_from_component_key", args);
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -1602,16 +1645,20 @@ server.registerTool(
   "create_instance_from_set_key",
   {
     title: "Create instance from set key",
-    description: "Create an instance from a library component set key (default variant) inside the target frame/parent.",
+    description: "Create an instance from a library component set key (default variant) inside the target frame/parent. Pass parentNodeId + index for auto-layout stacks; omit x/y unless the parent is freeform.",
     inputSchema: {
       componentSetKey: z.string(),
       parentNodeId: z.string().optional(),
       x: z.number().optional(),
-      y: z.number().optional()
+      y: z.number().optional(),
+      index: z.number().optional(),
+      ignoreAutoLayout: z.boolean().optional(),
+      layoutSizingHorizontal: z.string().optional().describe("FIXED | HUG | FILL"),
+      layoutSizingVertical: z.string().optional().describe("FIXED | HUG | FILL")
     }
   },
-  async ({ componentSetKey, parentNodeId, x, y }) => {
-    const result = await sendCommand("create_instance_from_component_set_key", { componentSetKey, parentNodeId, x, y });
+  async (args) => {
+    const result = await sendCommand("create_instance_from_component_set_key", args);
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -1727,16 +1774,21 @@ server.registerTool(
   "create_instance_from_instance",
   {
     title: "Create instance from instance",
-    description: "Create a new instance of whatever main component an existing instance points at. Use this to duplicate a component usage you found on the canvas when you do not know its component id or key — read the source instance's overrides with get_instance_properties and reapply them with set_instance_properties if you need a copy rather than a fresh default instance.",
+    description: "Create a new instance of whatever main component an existing instance points at. Pass parentNodeId (or parentId) to drop it into a frame, stack, or slot. Inside auto layout omit x/y and use index.",
     inputSchema: {
       instanceId: z.string(),
       x: z.number().optional(),
       y: z.number().optional(),
-      parentId: z.string().optional()
+      parentNodeId: z.string().optional(),
+      parentId: z.string().optional().describe("Alias for parentNodeId."),
+      index: z.number().optional(),
+      ignoreAutoLayout: z.boolean().optional(),
+      layoutSizingHorizontal: z.string().optional().describe("FIXED | HUG | FILL"),
+      layoutSizingVertical: z.string().optional().describe("FIXED | HUG | FILL")
     }
   },
-  async ({ instanceId, x, y, parentId }) => {
-    const result = await sendCommand("create_instance_from_instance", { instanceId, x, y, parentId });
+  async (args) => {
+    const result = await sendCommand("create_instance_from_instance", args);
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -1745,18 +1797,27 @@ server.registerTool(
   "set_stroke_color",
   {
     title: "Set stroke color",
-    description: "Set the stroke color and weight of a node (RGB can be 0..1 or 0..255).",
+    description:
+      "Set or clear a node's stroke. Color via hex/strokeHex or r/g/b (0..1 or 0..255), optional strokeWeight, strokeAlign (CENTER|INSIDE|OUTSIDE), dashPattern (e.g. [4,4]), strokeCap (NONE|ROUND|SQUARE), strokeJoin (MITER|BEVEL|ROUND), or styleId to apply a paint style. Pass clear:true to remove strokes.",
     inputSchema: {
       nodeId: z.string(),
-      r: z.number(),
-      g: z.number(),
-      b: z.number(),
+      r: z.number().optional(),
+      g: z.number().optional(),
+      b: z.number().optional(),
       opacity: z.number().optional(),
-      strokeWeight: z.number().optional()
+      hex: z.string().optional(),
+      strokeHex: z.string().optional(),
+      strokeWeight: z.number().optional(),
+      strokeAlign: z.string().optional().describe("CENTER | INSIDE | OUTSIDE"),
+      dashPattern: z.array(z.number()).optional().describe("e.g. [4, 4] for dashed; [] for solid"),
+      strokeCap: z.string().optional().describe("NONE | ROUND | SQUARE"),
+      strokeJoin: z.string().optional().describe("MITER | BEVEL | ROUND"),
+      styleId: z.string().optional().describe("Apply a local paint style to strokes"),
+      clear: z.boolean().optional().describe("Remove all strokes")
     }
   },
-  async ({ nodeId, r, g, b, opacity, strokeWeight }) => {
-    const result = await sendCommand("set_stroke_color", { nodeId, r, g, b, opacity, strokeWeight });
+  async (args) => {
+    const result = await sendCommand("set_stroke_color", args);
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -1765,17 +1826,20 @@ server.registerTool(
   "reparent_node",
   {
     title: "Reparent node",
-    description: "Move (cut) an existing node into a new parent container (frame, section, group, auto-layout, slot, or page). In auto-layout parents the node joins the flow unless x/y are given (then it is set to absolute positioning).",
+    description: "Move (cut) an existing node into a new parent container (frame, section, group, auto-layout, slot, or page). Inside auto layout the node joins the flow (omit x/y, pass index). Pass ignoreAutoLayout + x/y only for overlays.",
     inputSchema: {
       nodeId: z.string(),
       newParentId: z.string(),
       index: z.number().int().min(0).optional().describe("Insert at this child index instead of appending at the end. Controls order inside auto-layout containers."),
-      x: z.number().optional(),
-      y: z.number().optional()
+      x: z.number().optional().describe("Parent-relative x. Ignored inside auto layout unless ignoreAutoLayout is true."),
+      y: z.number().optional(),
+      ignoreAutoLayout: z.boolean().optional(),
+      layoutSizingHorizontal: z.string().optional().describe("FIXED | HUG | FILL"),
+      layoutSizingVertical: z.string().optional().describe("FIXED | HUG | FILL")
     }
   },
-  async ({ nodeId, newParentId, index, x, y }) => {
-    const result = await sendCommand("reparent_node", { nodeId, newParentId, index, x, y });
+  async (args) => {
+    const result = await sendCommand("reparent_node", args);
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -1801,15 +1865,18 @@ server.registerTool(
   "insert_child",
   {
     title: "Insert child",
-    description: "Insert an existing child node at an index inside a parent container.",
+    description: "Insert an existing child node at an index inside a parent container. Omit index to append at the end. Inside auto layout this keeps the child in the flow (layoutPositioning AUTO) unless ignoreAutoLayout is true.",
     inputSchema: {
       parentId: z.string(),
       childId: z.string(),
-      index: z.number().optional()
+      index: z.number().optional(),
+      ignoreAutoLayout: z.boolean().optional(),
+      layoutSizingHorizontal: z.string().optional().describe("FIXED | HUG | FILL"),
+      layoutSizingVertical: z.string().optional().describe("FIXED | HUG | FILL")
     }
   },
-  async ({ parentId, childId, index }) => {
-    const result = await sendCommand("insert_child", { parentId, childId, index });
+  async (args) => {
+    const result = await sendCommand("insert_child", args);
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -1818,17 +1885,19 @@ server.registerTool(
   "move_node",
   {
     title: "Move node",
-    description: "Move a node on the canvas. Pass absolute x/y, or relative dx/dy to nudge. Children of auto-layout containers are automatically switched to absolute positioning so they can move freely.",
+    description:
+      "Move a node on the canvas. Pass absolute x/y, or relative dx/dy to nudge. Inside auto layout this is rejected unless ignoreAutoLayout is true (Ignore auto layout / overlay). Reorder stacks with insert_child; align with set_axis_align.",
     inputSchema: {
       nodeId: z.string(),
       x: z.number().optional().describe("Absolute target x. Omit to keep current and use dx instead."),
       y: z.number().optional().describe("Absolute target y. Omit to keep current and use dy instead."),
       dx: z.number().optional().describe("Relative x offset. Applied only when x is omitted."),
-      dy: z.number().optional().describe("Relative y offset. Applied only when y is omitted.")
+      dy: z.number().optional().describe("Relative y offset. Applied only when y is omitted."),
+      ignoreAutoLayout: z.boolean().optional().describe("Required to x/y-move a child of an auto-layout parent. Pins the node as an overlay.")
     }
   },
-  async ({ nodeId, x, y, dx, dy }) => {
-    const result = await sendCommand("move_node", { nodeId, x, y, dx, dy });
+  async ({ nodeId, x, y, dx, dy, ignoreAutoLayout }) => {
+    const result = await sendCommand("move_node", { nodeId, x, y, dx, dy, ignoreAutoLayout });
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -1837,15 +1906,18 @@ server.registerTool(
   "resize_node",
   {
     title: "Resize node",
-    description: "Resize a node with new dimensions.",
+    description:
+      "Resize a node. Width and/or height may be passed. For TEXT: WIDTH_AND_HEIGHT (hug) refuses resize — pass textAutoResize HEIGHT (width only) or NONE (fixed). Setting only width on hug auto-promotes to HEIGHT. Prefer set_layout_sizing for HUG/FILL.",
     inputSchema: {
       nodeId: z.string(),
-      width: z.number(),
-      height: z.number()
+      width: z.number().optional(),
+      height: z.number().optional(),
+      textAutoResize: z.string().optional().describe("TEXT only: WIDTH_AND_HEIGHT | HEIGHT | NONE | TRUNCATE"),
+      forceFixed: z.boolean().optional().describe("TEXT only: force textAutoResize NONE before resizing")
     }
   },
-  async ({ nodeId, width, height }) => {
-    const result = await sendCommand("resize_node", { nodeId, width, height });
+  async (args) => {
+    const result = await sendCommand("resize_node", args);
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -2276,11 +2348,12 @@ server.registerTool(
   "create_text_style",
   {
     title: "Create text style",
-    description: "Create or update a local text style.",
+    description: "Create or update a local text style. For variable fonts, pass variationSettings (OpenType axis map) and optionally omit fontStyle so Figma picks the matching named instance.",
     inputSchema: {
       name: z.string(),
       fontFamily: z.string(),
       fontStyle: z.string().optional(),
+      variationSettings: z.record(z.number()).optional().describe("Variable-font axis values keyed by OpenType tag, e.g. { wght: 550 }."),
       fontSize: z.number().optional(),
       lineHeight: z.number().optional(),
       letterSpacing: z.number().optional(),
@@ -2364,7 +2437,8 @@ server.registerTool(
   "apply_stroke_style",
   {
     title: "Apply stroke style",
-    description: "Apply a paint style to a node's strokes.",
+    description:
+      "Apply a paint style to a node's strokes (design-system preferred). For raw color/weight/align/dash without a style, use set_stroke_color instead.",
     inputSchema: {
       nodeId: z.string(),
       styleId: z.string()
@@ -2464,18 +2538,22 @@ server.registerTool(
   "create_component",
   {
     title: "Create component",
-    description: "Create a new empty component node.",
+    description: "Create a new empty component. Pass parentNodeId to insert into a frame, auto-layout stack, or slot. Inside auto layout omit x/y and use index. Nested into auto layout, omit width/height unless you want a fixed size.",
     inputSchema: {
       name: z.string().optional(),
       parentNodeId: z.string().optional(),
       x: z.number().optional(),
       y: z.number().optional(),
       width: z.number().optional(),
-      height: z.number().optional()
+      height: z.number().optional(),
+      index: z.number().optional(),
+      ignoreAutoLayout: z.boolean().optional(),
+      layoutSizingHorizontal: z.string().optional().describe("FIXED | HUG | FILL"),
+      layoutSizingVertical: z.string().optional().describe("FIXED | HUG | FILL")
     }
   },
-  async ({ name, parentNodeId, x, y, width, height }) => {
-    const result = await sendCommand("create_component", { name, parentNodeId, x, y, width, height });
+  async (args) => {
+    const result = await sendCommand("create_component", args);
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -2751,15 +2829,20 @@ server.registerTool(
   "create_component_instance",
   {
     title: "Create component instance",
-    description: "Create an instance of a component.",
+    description: "Create an instance of a local component. Pass parentNodeId to insert into a frame, auto-layout stack, or slot. Inside auto layout omit x/y and use index.",
     inputSchema: {
       componentId: z.string(),
       x: z.number().optional(),
-      y: z.number().optional()
+      y: z.number().optional(),
+      parentNodeId: z.string().optional(),
+      index: z.number().optional(),
+      ignoreAutoLayout: z.boolean().optional(),
+      layoutSizingHorizontal: z.string().optional().describe("FIXED | HUG | FILL"),
+      layoutSizingVertical: z.string().optional().describe("FIXED | HUG | FILL")
     }
   },
-  async ({ componentId, x, y }) => {
-    const result = await sendCommand("create_component_instance", { componentId, x, y });
+  async (args) => {
+    const result = await sendCommand("create_component_instance", args);
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -2768,16 +2851,19 @@ server.registerTool(
   "export_node_as_image",
   {
     title: "Export node as image",
-    description: "Export a node as an image (PNG, JPG, SVG, or PDF). Returns base64, or writes the bytes to a file when localPath is given (kept inside the figma-write-bridge repo).",
+    description: "Export a node as an image (PNG, JPG, SVG, or PDF) or as video (MP4, GIF, WEBM) for a top-level frame with Motion. Prefer localPath so bytes are written to disk inside the figma-write-bridge repo instead of returning base64. If the payload would exceed the MCP result cap, the server auto-saves under exports/ and returns the path. Video export is only available in Figma Desktop for animated top-level frames.",
     inputSchema: {
       nodeId: z.string(),
-      format: z.string().optional(),
+      format: z.string().optional().describe("PNG | JPG | SVG | PDF | MP4 | GIF | WEBM"),
       scale: z.number().optional(),
+      fps: z.number().optional().describe("Video only. Frames per second."),
+      quality: z.string().optional().describe("Video only. Quality preset, e.g. HIGH."),
+      loopCount: z.number().optional().describe("GIF only. Number of loops; omit for infinite."),
       localPath: z.string().optional()
     }
   },
-  async ({ nodeId, format, scale, localPath }) => {
-    const result = await sendCommand("export_node_as_image", { nodeId, format, scale });
+  async ({ nodeId, format, scale, fps, quality, loopCount, localPath }) => {
+    const result = await sendCommand("export_node_as_image", { nodeId, format, scale, fps, quality, loopCount });
     if (typeof localPath === "string" && localPath.trim()) {
       const absFilePath = resolveSafeOutputDir(localPath);
       await mkdir(dirname(absFilePath), { recursive: true });
@@ -2785,6 +2871,24 @@ server.registerTool(
       if (!base64) throw new Error("Export returned no base64 to write to disk");
       await writeFile(absFilePath, Buffer.from(base64, "base64"));
       return { content: [{ type: "text", text: JSON.stringify({ nodeId: result.nodeId, format: result.format, scale: result.scale, bytesLength: result.bytesLength, savedPath: absFilePath }) }] };
+    }
+    const encoded = JSON.stringify(result);
+    if (Buffer.byteLength(encoded, "utf8") > MAX_RESULT_BYTES) {
+      const ext = String((result && result.format) || format || "PNG").toLowerCase();
+      const safeId = String(nodeId).replace(/[^A-Za-z0-9_-]/g, "-");
+      const absFilePath = resolveSafeOutputDir(`exports/${safeId}.${ext}`);
+      await mkdir(dirname(absFilePath), { recursive: true });
+      const base64 = result && typeof result.base64 === "string" ? result.base64 : "";
+      if (base64) await writeFile(absFilePath, Buffer.from(base64, "base64"));
+      return { content: [{ type: "text", text: JSON.stringify({
+        nodeId: result && result.nodeId,
+        format: result && result.format,
+        scale: result && result.scale,
+        bytesLength: result && result.bytesLength,
+        savedPath: absFilePath,
+        autoSaved: true,
+        note: "Export exceeded the MCP result cap; wrote bytes to disk instead of returning base64. Pass localPath to choose the file."
+      }) }] };
     }
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
@@ -2810,8 +2914,9 @@ server.registerTool(
       hasOverrides: z.boolean().optional().describe("Instances only: true = has overrides, false = clean. Implies types:[\"INSTANCE\"]."),
       mainComponentName: z.string().optional().describe("Instances only: substring of the main component's name. Implies types:[\"INSTANCE\"]."),
       visible: z.boolean().optional().describe("Filter by visibility."),
+      layoutMode: z.string().optional().describe("Match auto-layout mode: NONE, HORIZONTAL, VERTICAL, or GRID."),
       matchCase: z.boolean().optional().describe("Case-sensitive name/text matching. Default false."),
-      rootNodeId: z.string().optional().describe("Restrict to this node's subtree on the current page."),
+      rootNodeId: z.string().optional().describe("Restrict to this node's subtree (any page). When set, allPages is ignored."),
       allPages: z.boolean().optional().describe("Search every page. Default false (current page only)."),
       fields: z.array(z.string()).optional().describe("Extra per-match columns: fillHex, characters, boundVariableIds, or any node property (e.g. opacity)."),
       limit: z.number().int().min(1).optional().describe("Max matches to return. Default 200, cap 1000."),
@@ -2835,16 +2940,24 @@ server.registerTool(
   "scan_nodes_by_types",
   {
     title: "Scan nodes by types",
-    description: "Scan for nodes with specific types. Returns a columnar table: fields lists the column names and rows holds one array per node. For anything more selective than a type filter, prefer find_nodes.",
+    description: "List nodes of given types in a subtree. Prefer find_nodes for anything more selective than a type filter. Defaults to the current page, or the single target frame if one is set. Pass rootNodeId to scope. Paged (default limit 200). Returns a columnar table plus total/offset/limit/truncated.",
     inputSchema: {
       types: z.array(z.string()),
+      rootNodeId: z.string().optional().describe("Subtree to scan. Defaults to the current page, or the single target frame."),
+      limit: z.number().int().min(1).optional().describe("Max rows to return. Default 200."),
+      offset: z.number().int().min(0).optional().describe("Skip this many matches, for paging."),
       verbose: z.boolean().optional().describe("Return an array of objects instead of the columnar fields/rows table.")
     }
   },
-  async ({ types, verbose }) => {
-    const result = await sendCommand("scan_nodes_by_types", { types });
-    const columnar = verbose ? null : toColumnar(result);
-    return { content: [{ type: "text", text: JSON.stringify(columnar || result) }] };
+  async ({ types, rootNodeId, limit, offset, verbose }) => {
+    const result = await sendCommand("scan_nodes_by_types", { types, rootNodeId, limit, offset });
+    const list = Array.isArray(result) ? result : (result && result.items);
+    if (verbose || !Array.isArray(list)) {
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    }
+    const rest = Array.isArray(result) ? {} : (({ items, ...r }) => r)(result);
+    const columnar = toColumnar(list);
+    return { content: [{ type: "text", text: JSON.stringify(columnar ? { ...rest, ...columnar } : result) }] };
   }
 );
 
@@ -2852,14 +2965,17 @@ server.registerTool(
   "get_annotations",
   {
     title: "Get annotations",
-    description: "Get all annotations in the current document or specific node.",
+    description: "Get annotations on a node or in a subtree. Page-wide scans are paged (default limit 100). Pass nodeId for one node, or rootNodeId to scope. includeCategories defaults to false (pass true to expand category labels).",
     inputSchema: {
       nodeId: z.string().optional(),
-      includeCategories: z.boolean().optional()
+      rootNodeId: z.string().optional().describe("Subtree to scan when nodeId is omitted. Defaults to the current page or single target frame."),
+      includeCategories: z.boolean().optional().describe("Include category id/label/color on each annotation. Default false."),
+      limit: z.number().int().min(1).optional().describe("Max annotated nodes to return. Default 100."),
+      offset: z.number().int().min(0).optional()
     }
   },
-  async ({ nodeId, includeCategories }) => {
-    const result = await sendCommand("get_annotations", { nodeId, includeCategories });
+  async ({ nodeId, rootNodeId, includeCategories, limit, offset }) => {
+    const result = await sendCommand("get_annotations", { nodeId, rootNodeId, includeCategories, limit, offset });
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -3306,7 +3422,7 @@ server.registerTool(
   "get_motion",
   {
     title: "Get motion",
-    description: "Read Motion state — timelines (with durations in seconds), manual keyframe tracks, applied animation styles, and resolved animations — for the given nodes, or the current selection when none are given. Motion is distinct from prototype reactions: reactions link frames on click, Motion animates properties over a timeline inside one top-level frame. Returns motionEnabled:false when the account lacks the Motion feature flag.",
+    description: "Read Motion state — timelines (with durations in seconds), the current playheadPosition in seconds (undefined when no timeline is active), manual keyframe tracks, applied animation styles, and resolved animations — for the given nodes, or the current selection when none are given. Motion is distinct from prototype reactions: reactions link frames on click, Motion animates properties over a timeline inside one top-level frame. Returns motionEnabled:false when the account lacks the Motion feature flag.",
     inputSchema: {
       nodeId: z.string().optional(),
       nodeIds: z.array(z.string()).optional()
@@ -3435,11 +3551,66 @@ server.registerTool(
   "list_shaders",
   {
     title: "List shaders",
-    description: "List shader effects and fills available to this file, with their ids and property definitions. Returns an empty list when the account has no shaders published or the build does not support them.",
-    inputSchema: {}
+    description: "List shader effects and fills available to this file (in-file, subscribed libraries, and owned shaders), with ids, type (effect|fill), and imported. Property definitions are omitted unless includeProperties is true — import_shader_by_id already returns them. Shaders with imported:false must be imported before apply_shader.",
+    inputSchema: {
+      includeProperties: z.boolean().optional().describe("Include propertyDefinitions on every shader. Default false.")
+    }
   },
-  async () => {
-    const result = await sendCommand("list_shaders", {});
+  async ({ includeProperties } = {}) => {
+    const result = await sendCommand("list_shaders", { includeProperties });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "import_shader_by_id",
+  {
+    title: "Import shader by id",
+    description: "Import a shader into the current file so it can be applied. Pass shaderId (from list_shaders) or name. Idempotent if the shader is already imported; returns the shader with imported:true and populated propertyDefinitions.",
+    inputSchema: {
+      shaderId: z.string().optional().describe("Shader id from list_shaders."),
+      name: z.string().optional().describe("Shader name from list_shaders, if you do not have the id.")
+    }
+  },
+  async (args) => {
+    const result = await sendCommand("import_shader_by_id", args);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "apply_shader",
+  {
+    title: "Apply shader",
+    description: "Import (if needed) and apply a shader to a node. Effect shaders go on effects; fill shaders go on fills or strokes. properties may be keyed by property-definition id or by the author-defined name from propertyDefinitions. Prefer this over set_effects when applying a SHADER. Pass replace:false to append an effect shader alongside existing effects.",
+    inputSchema: {
+      nodeId: z.string(),
+      shaderId: z.string().optional().describe("Shader id from list_shaders."),
+      name: z.string().optional().describe("Shader name from list_shaders, if you do not have the id."),
+      target: z.enum(["fills", "strokes", "effects"]).optional().describe("Where to apply. Defaults to effects for type=effect shaders and fills for type=fill shaders."),
+      properties: z.record(z.any()).optional().describe("Property values keyed by definition id or property name. Hex strings are accepted for COLOR properties."),
+      paintIndex: z.number().optional().describe("For fills/strokes, which paint slot to write. Default 0."),
+      visible: z.boolean().optional().describe("For effect shaders. Default true."),
+      replace: z.boolean().optional().describe("For effect shaders: true (default) replaces all effects; false appends.")
+    }
+  },
+  async (args) => {
+    const result = await sendCommand("apply_shader", args);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "get_font_variation_axes",
+  {
+    title: "Get font variation axes",
+    description: "Return the OpenType variation axes a font family exposes (e.g. wght, slnt, opsz), or null/variable:false for a static family. Use this before setting variationSettings on create_text / set_text_style / create_text_style. Requires Figma Desktop with Plugin API Update 138 (variable fonts).",
+    inputSchema: {
+      family: z.string().describe("Font family name, e.g. \"Inter\".")
+    }
+  },
+  async (args) => {
+    const result = await sendCommand("get_font_variation_axes", args);
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -3642,7 +3813,7 @@ server.registerTool(
   "bind_variable_to_property",
   {
     title: "Bind variable to property",
-    description: "Bind a FLOAT/STRING/BOOLEAN variable to a node property via setBoundVariable(property, variable).",
+    description: "Bind a FLOAT/STRING/BOOLEAN/EASING/TIMING variable to a node property via setBoundVariable(property, variable). Use property \"opacity\" to token-bind layer opacity (pair a FLOAT variable with a color rather than detaching the fill). Also used for padding, radius, spacing, and fontSize.",
     inputSchema: {
       nodeId: z.string(),
       property: z.string(),
@@ -3691,14 +3862,18 @@ server.registerTool(
   "append_to_slot",
   {
     title: "Append to slot",
-    description: "Reparent existing nodes into a SLOT node.",
+    description: "Reparent existing nodes into a SLOT. Children join the slot's layout flow (AUTO + FILL when the slot is auto layout) at 0,0 when it is freeform. Do not move_node afterwards. Optionally pass index and layoutSizing.",
     inputSchema: {
       slotNodeId: z.string(),
-      nodeIds: z.array(z.string())
+      nodeIds: z.array(z.string()),
+      index: z.number().optional(),
+      ignoreAutoLayout: z.boolean().optional(),
+      layoutSizingHorizontal: z.string().optional().describe("FIXED | HUG | FILL — default FILL when the slot itself is auto layout."),
+      layoutSizingVertical: z.string().optional().describe("FIXED | HUG | FILL")
     }
   },
-  async ({ slotNodeId, nodeIds }) => {
-    const result = await sendCommand("append_to_slot", { slotNodeId, nodeIds });
+  async (args) => {
+    const result = await sendCommand("append_to_slot", args);
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -3707,7 +3882,8 @@ server.registerTool(
   "set_auto_layout",
   {
     title: "Set auto layout",
-    description: "Set multiple auto-layout properties in one call.",
+    description:
+      "Set multiple auto-layout properties in one call. sizing may include primaryAxisSizingMode/counterAxisSizingMode and/or layoutSizingHorizontal|width + layoutSizingVertical|height (FIXED|HUG|FILL). Empty frames keep Figma's default white fill stripped unless you pass clearFill:false.",
     inputSchema: {
       frameId: z.string(),
       layoutMode: z.string().optional(),
@@ -3726,22 +3902,22 @@ server.registerTool(
       sizing: z
         .object({
           primaryAxisSizingMode: z.string().optional(),
-          counterAxisSizingMode: z.string().optional()
+          counterAxisSizingMode: z.string().optional(),
+          layoutSizingHorizontal: z.string().optional(),
+          layoutSizingVertical: z.string().optional(),
+          width: z.string().optional(),
+          height: z.string().optional()
         })
-        .optional()
+        .optional(),
+      layoutSizingHorizontal: z.string().optional(),
+      layoutSizingVertical: z.string().optional(),
+      width: z.string().optional().describe("Alias for layoutSizingHorizontal: FIXED | HUG | FILL"),
+      height: z.string().optional().describe("Alias for layoutSizingVertical: FIXED | HUG | FILL"),
+      clearFill: z.boolean().optional().describe("Default true for empty wrappers: strip leftover default white. False keeps an existing white card fill.")
     }
   },
-  async ({ frameId, layoutMode, layoutWrap, primaryAxisAlignItems, counterAxisAlignItems, itemSpacing, padding, sizing }) => {
-    const result = await sendCommand("set_auto_layout", {
-      frameId,
-      layoutMode,
-      layoutWrap,
-      primaryAxisAlignItems,
-      counterAxisAlignItems,
-      itemSpacing,
-      padding,
-      sizing
-    });
+  async (args) => {
+    const result = await sendCommand("set_auto_layout", args);
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -3750,15 +3926,16 @@ server.registerTool(
   "set_layout_mode",
   {
     title: "Set layout mode",
-    description: "Set the layout mode and wrap behavior of a frame: NONE, HORIZONTAL, VERTICAL, or GRID. GRID is a full cell-based layout — configure its tracks with set_grid_layout and place children with set_grid_child_position. layoutWrap (NO_WRAP | WRAP) applies to HORIZONTAL only.",
+    description: "Set the layout mode and wrap behavior of a frame: NONE, HORIZONTAL, VERTICAL, or GRID. GRID is a full cell-based layout — configure its tracks with set_grid_layout and place children with set_grid_child_position. layoutWrap (NO_WRAP | WRAP) applies to HORIZONTAL only. Empty wrappers strip leftover default white fill unless clearFill is false.",
     inputSchema: {
       nodeId: z.string(),
       layoutMode: z.string(),
-      layoutWrap: z.string().optional()
+      layoutWrap: z.string().optional(),
+      clearFill: z.boolean().optional().describe("Default true for empty wrappers: strip leftover default white.")
     }
   },
-  async ({ nodeId, layoutMode, layoutWrap }) => {
-    const result = await sendCommand("set_layout_mode", { nodeId, layoutMode, layoutWrap });
+  async (args) => {
+    const result = await sendCommand("set_layout_mode", args);
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -3803,23 +3980,21 @@ server.registerTool(
   "set_layout_sizing",
   {
     title: "Set layout sizing",
-    description: "Set sizing modes for auto-layout frames.",
+    description:
+      "Set hug/fill/fixed sizing. Prefer layoutSizingHorizontal/Vertical or width/height aliases with FIXED | HUG | FILL. For TEXT nodes you can also pass textAutoResize (WIDTH_AND_HEIGHT | HEIGHT | NONE | TRUNCATE) so wrap mode stays aligned with sizing.",
     inputSchema: {
       nodeId: z.string(),
       primaryAxisSizingMode: z.string().optional(),
       counterAxisSizingMode: z.string().optional(),
       layoutSizingHorizontal: z.string().optional(),
-      layoutSizingVertical: z.string().optional()
+      layoutSizingVertical: z.string().optional(),
+      width: z.string().optional().describe("Alias for layoutSizingHorizontal: FIXED | HUG | FILL"),
+      height: z.string().optional().describe("Alias for layoutSizingVertical: FIXED | HUG | FILL"),
+      textAutoResize: z.string().optional().describe("TEXT only: WIDTH_AND_HEIGHT | HEIGHT | NONE | TRUNCATE")
     }
   },
-  async ({ nodeId, primaryAxisSizingMode, counterAxisSizingMode, layoutSizingHorizontal, layoutSizingVertical }) => {
-    const result = await sendCommand("set_layout_sizing", {
-      nodeId,
-      primaryAxisSizingMode,
-      counterAxisSizingMode,
-      layoutSizingHorizontal,
-      layoutSizingVertical
-    });
+  async (args) => {
+    const result = await sendCommand("set_layout_sizing", args);
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -3942,7 +4117,7 @@ server.registerTool(
   "get_font_list",
   {
     title: "Get font list",
-    description: "List the distinct fonts (family + style) used in the current page or a rootNodeId subtree, with usage counts.",
+    description: "List the distinct fonts (family + style, plus variationSettings when the text uses a variable font) used in the current page or a rootNodeId subtree, with usage counts. Pair with get_font_variation_axes to inspect a family's OpenType axes.",
     inputSchema: {
       rootNodeId: z.string().optional()
     }
@@ -4030,12 +4205,13 @@ server.registerTool(
   "create_typography_scale",
   {
     title: "Create typography scale",
-    description: "Create a text-style scale (caption/body/h3/h2/h1/display by default, or custom steps) from a baseSize and ratio: fontSize = base * ratio^offset. Can also create sample text nodes in a frame (createSampleFrame) spanning the steps.",
+    description: "Create a text-style scale (caption/body/h3/h2/h1/display by default, or custom steps) from a baseSize and ratio: fontSize = base * ratio^offset. Can also create sample text nodes in a frame (createSampleFrame) spanning the steps. For variable fonts, pass variationSettings and optionally omit fontStyle.",
     inputSchema: {
       baseSize: z.number().optional(),
       ratio: z.number().optional(),
       fontFamily: z.string().optional(),
       fontStyle: z.string().optional(),
+      variationSettings: z.record(z.number()).optional().describe("Variable-font axis values keyed by OpenType tag, e.g. { wght: 550 }."),
       prefix: z.string().optional(),
       steps: z.array(z.string()).optional(),
       lineHeightRatio: z.number().optional(),
@@ -4045,8 +4221,8 @@ server.registerTool(
       parentNodeId: z.string().optional()
     }
   },
-  async ({ baseSize, ratio, fontFamily, fontStyle, prefix, steps, lineHeightRatio, lineHeight, letterSpacing, createSampleFrame, parentNodeId }) => {
-    const result = await sendCommand("create_typography_scale", { baseSize, ratio, fontFamily, fontStyle, prefix, steps, lineHeightRatio, lineHeight, letterSpacing, createSampleFrame, parentNodeId });
+  async ({ baseSize, ratio, fontFamily, fontStyle, variationSettings, prefix, steps, lineHeightRatio, lineHeight, letterSpacing, createSampleFrame, parentNodeId }) => {
+    const result = await sendCommand("create_typography_scale", { baseSize, ratio, fontFamily, fontStyle, variationSettings, prefix, steps, lineHeightRatio, lineHeight, letterSpacing, createSampleFrame, parentNodeId });
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -4128,7 +4304,7 @@ server.registerTool(
   "set_effects",
   {
     title: "Set effects",
-    description: "Set effects on a node. Pass effectStyleId to apply an existing style, or effects as a raw array. Supported types: DROP_SHADOW and INNER_SHADOW ({color, offset:{x,y}, radius, spread}; DROP_SHADOW also takes showShadowBehindNode), LAYER_BLUR and BACKGROUND_BLUR ({radius, blurType:'NORMAL'} or blurType:'PROGRESSIVE' with startRadius/startOffset/endOffset), NOISE ({color, noiseSize, density, noiseType:'MONOTONE'|'DUOTONE'|'MULTITONE'}), TEXTURE ({noiseSize, radius, clipToShape}), and GLASS ({lightIntensity, lightAngle, refraction, depth, dispersion, radius}). Figma requires visible and blendMode on shadows and visible plus blurType on blurs; the bridge fills those in and strips any key the effect variant does not declare, so pass only the fields you care about and never echo back an effect read off another node. boundVariables.color can bind a variable to the shadow color.",
+    description: "Set effects on a node. Pass effectStyleId to apply an existing style, or effects as a raw array. Supported types: DROP_SHADOW and INNER_SHADOW ({color, offset:{x,y}, radius, spread}; DROP_SHADOW also takes showShadowBehindNode), LAYER_BLUR and BACKGROUND_BLUR ({radius, blurType:'NORMAL'} or blurType:'PROGRESSIVE' with startRadius/startOffset/endOffset), NOISE ({color, noiseSize, density, noiseType:'MONOTONE'|'DUOTONE'|'MULTITONE'}), TEXTURE ({noiseSize, radius, clipToShape}), GLASS ({lightIntensity, lightAngle, refraction, depth, dispersion, radius}), and SHADER ({id, properties}) after the shader has been imported. Prefer apply_shader for shaders. Figma requires visible and blendMode on shadows and visible plus blurType on blurs; the bridge fills those in and strips any key the effect variant does not declare, so pass only the fields you care about and never echo back an effect read off another node. boundVariables.color can bind a variable to the shadow color.",
     inputSchema: z
       .object({
         nodeId: z.string(),
@@ -4277,19 +4453,26 @@ server.registerTool(
   "set_text_style",
   {
     title: "Set text style",
-    description: "Apply a text style and/or fine-grained typography to a TEXT node. Pass textStyleId to apply an existing style; also supports fontFamily/fontStyle, fontSize, lineHeight (number|'AUTO'|{unit,value}), letterSpacing (number|{unit,value}), textCase, textDecoration, textAlignHorizontal/Vertical, paragraphIndent/Spacing, fillsHex/fills/fillStyleId, boundVariables, textWrapStyle (AUTO | BALANCE for even line lengths, good on headings | PRETTY to avoid orphans), textTruncation (DISABLED | ENDING) and maxLines (an integer, or null to clear the cap; needs truncation ENDING to take effect).",
+    description:
+      "Apply a text style and/or fine-grained typography to a TEXT node. Pass textStyleId to apply an existing style; also supports fontFamily/fontStyle, variationSettings (variable-font axes, e.g. {wght:550}), fontSize, lineHeight (number|'AUTO'|{unit,value}), letterSpacing (number|{unit,value}), textCase, textDecoration, textAlignHorizontal (LEFT|CENTER|RIGHT|JUSTIFIED), textAlignVertical (TOP|CENTER|BOTTOM), textAutoResize (WIDTH_AND_HEIGHT|HEIGHT|NONE|TRUNCATE), layoutSizingHorizontal/Vertical or width/height (FIXED|HUG|FILL), paragraphIndent/Spacing, fillsHex/fills/fillStyleId, boundVariables, textWrapStyle (AUTO|BALANCE|PRETTY), textTruncation (DISABLED|ENDING) and maxLines.",
     inputSchema: {
       nodeId: z.string(),
       textStyleId: z.string().optional(),
       fontFamily: z.string().optional(),
       fontStyle: z.string().optional(),
+      variationSettings: z.record(z.number()).optional().describe("Variable-font axis values keyed by OpenType tag, e.g. { wght: 550, slnt: -10 }."),
       fontSize: z.number().optional(),
       lineHeight: z.union([z.number(), z.literal("AUTO"), z.object({ unit: z.string().optional(), value: z.number().optional() })]).optional(),
       letterSpacing: z.union([z.number(), z.object({ unit: z.string().optional(), value: z.number().optional() })]).optional(),
       textCase: z.string().optional(),
       textDecoration: z.string().optional(),
-      textAlignHorizontal: z.string().optional(),
-      textAlignVertical: z.string().optional(),
+      textAlignHorizontal: z.string().optional().describe("LEFT | CENTER | RIGHT | JUSTIFIED"),
+      textAlignVertical: z.string().optional().describe("TOP | CENTER | BOTTOM"),
+      textAutoResize: z.string().optional().describe("WIDTH_AND_HEIGHT | HEIGHT | NONE | TRUNCATE"),
+      layoutSizingHorizontal: z.string().optional(),
+      layoutSizingVertical: z.string().optional(),
+      width: z.string().optional().describe("Alias for layoutSizingHorizontal"),
+      height: z.string().optional().describe("Alias for layoutSizingVertical"),
       paragraphIndent: z.number().optional(),
       paragraphSpacing: z.number().optional(),
       fillsHex: z.string().optional(),
@@ -4301,10 +4484,8 @@ server.registerTool(
       maxLines: z.number().int().positive().nullable().optional()
     }
   },
-  async ({ nodeId, textStyleId, fontFamily, fontStyle, fontSize, lineHeight, letterSpacing, textCase, textDecoration, textAlignHorizontal, textAlignVertical, paragraphIndent, paragraphSpacing, fillsHex, fills, fillStyleId, boundVariables, textWrapStyle, textTruncation, maxLines }) => {
-    const result = await sendCommand("set_text_style", {
-      nodeId, textStyleId, fontFamily, fontStyle, fontSize, lineHeight, letterSpacing, textCase, textDecoration, textAlignHorizontal, textAlignVertical, paragraphIndent, paragraphSpacing, fillsHex, fills, fillStyleId, boundVariables, textWrapStyle, textTruncation, maxLines
-    });
+  async (args) => {
+    const result = await sendCommand("set_text_style", args);
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );

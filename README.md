@@ -6,6 +6,7 @@ This repo contains:
 - `figma-plugin/` — the Figma plugin (connects your Figma file to the bridge)
 - `mcp-server.js` — the local bridge server (runs on your computer)
 - `package.json` — Node.js setup (starts the server)
+- `skills/figma-write-bridge/` — agent skill; **zip this folder and upload the zip** to your AI agent (see below)
 
 ---
 
@@ -15,13 +16,14 @@ This repo contains:
 
 ## What It Can Do
 - **Frames, text, shapes, sections, and vectors** — create and edit nodes, including sections (`create_section`, `set_section_properties` to flip `SECTION`/`VIEWPORT`), vectors from SVG paths, and boolean groups.
-- **Move anything anywhere** — `move_node` (absolute `x`/`y` or relative `dx`/`dy`, auto-frees auto-layout children), `reparent_node` / `insert_child` (move any node into/out of frames, sections, groups, auto-layouts, and slots, with an `index` for order), `append_to_slot` (into component slots), `move_node_to_page` (cut or copy to another page), and `clone_node_into_parent` (copy into any container).
+- **Move anything anywhere** — `move_node` (absolute `x`/`y` or relative `dx`/`dy` on **freeform** parents; inside auto layout this is rejected unless you pass `ignoreAutoLayout: true` for an overlay), `reparent_node` / `insert_child` (move any node into/out of frames, sections, groups, auto-layouts, and slots, with an `index` for order — omit `index` to append), `append_to_slot` (into component slots; children join the slot’s layout flow), `move_node_to_page` (cut or copy to another page), and `clone_node_into_parent` (copy into any container).
 - **Resize to fit** — `resize_to_fit` scales any layer to fit inside a target layer (`fit: "contain"` letterboxes, `fit: "cover"` fills/crops, both aspect-preserving and centered), or shrink-wraps a container tightly to its own children when no `targetNodeId` is given.
 - **Find nodes by query** — `find_nodes` filters the whole document server-side by type, name/text, fill color, style/variable binding, instance overrides, and more (all combinable), so a search like "red button instances" or "hardcoded colors with no style" returns only the matches instead of a full tree dump.
-- **Layout & structure** — auto layout, padding/spacing/alignment, layout grids, one-call grid generators (`generate_grid`), and layout helpers (`distribute_nodes`, `arrange_children`, which are auto-layout aware). Primary-axis alignment includes `SPACE_AROUND` and `SPACE_EVENLY`.
+- **Layout & structure** — auto layout, padding/spacing/alignment, layout grids, one-call grid generators (`generate_grid`), and layout helpers (`distribute_nodes`, `arrange_children`). Those helpers **skip** auto-layout children instead of pulling them out of the flow — use `set_item_spacing` / `set_axis_align` / `insert_child` on stacks. Primary-axis alignment includes `SPACE_AROUND` and `SPACE_EVENLY`. `create_frame` defaults to **no fill**; nested auto-layout wrappers omit width/height so they do not ship at 320×200.
 - **Grid auto-layout** — `set_grid_layout` turns a frame into a true two-dimensional `GRID` container (row/column counts, gaps, and per-track `FLEX`/`FIXED`/`HUG` sizing), `set_grid_child_position` places each child by cell, span, and in-cell alignment, `get_grid_layout` reads the whole arrangement back, and `reorder_grid_tracks` moves entire rows or columns with their children.
-- **Fills & effects** — solid/gradient/image fills (from a URL, base64, or a local file path via `localPath`), and the full effect set: drop/inner shadows, normal and progressive blurs, plus `NOISE`, `TEXTURE`, and `GLASS`. Apply existing styles or variable-bound colors.
-- **Text styling** — apply existing text styles or set font/font-size/line-height/letter-spacing/case/alignment directly, with variable binding, plus paragraph-level `textWrapStyle` (`BALANCE`/`PRETTY`) and `textTruncation` + `maxLines`. Generate a whole type scale from a base size + ratio with `create_typography_scale`.
+- **Fills & effects** — solid/gradient/image fills (from a URL, base64, or a local file path via `localPath`), and the full effect set: drop/inner shadows, normal and progressive blurs, plus `NOISE`, `TEXTURE`, and `GLASS`. Apply existing styles or variable-bound colors. `create_frame` defaults to **no fill** (transparent layout containers); pass `fillHex` only for visible surfaces. `set_fill_color` / `set_stroke_color` support `clear: true`.
+- **Strokes** — `set_stroke_color` sets color/weight plus `strokeAlign`, `dashPattern`, `strokeCap`, `strokeJoin`, or applies a paint `styleId`; prefer `apply_stroke_style` / `bind_color_variable_to_stroke` when the file has tokens.
+- **Text styling** — apply existing text styles or set font/font-size/line-height/letter-spacing/case/alignment directly, with variable binding, paragraph-level `textWrapStyle` (`BALANCE`/`PRETTY`), `textTruncation` + `maxLines`, and variable-font `variationSettings` (after `get_font_variation_axes`). Generate a whole type scale from a base size + ratio with `create_typography_scale`.
 - **Design tokens** — export local variables as a W3C-style Design Tokens JSON (`export_tokens`) and import a tokens JSON into variables + paint styles (`import_tokens`).
 - **Style guides & palettes** — extract a usage style guide (`get_style_guide`: colors, fonts, sizes, spacing), list fonts used (`get_font_list`), and generate tonal color palettes with swatches/styles/variables (`generate_palette`).
 - **Components** — create/import components and instances (imports accept a `name` to rename the main node), batch-convert frames into a variant component set (`extract_component_set`), and move/copy a local component to another open file's channel with `move_component_to_file`. `get_local_components` is paged (`limit`/`offset` + `total`).
@@ -31,10 +33,11 @@ This repo contains:
 - **Variables & themes** — variable types cover `COLOR`, `FLOAT`, `STRING`, `BOOLEAN`, and the motion types `EASING` and `TIMING`, so animation curves and durations can be tokenized alongside color and spacing. Read variable values in every mode (`list_variables` with `includeValues: true` for the catalog, `get_variable` for one variable in detail with alias-resolved values per mode), create/rename/delete variable modes and collections, write values into any mode (`set_variable_values(valuesByMode)`), and theme-switch whole frames/pages with `set_variable_mode`. Catalog listings are paged to keep responses token-cheap: `list_variables` / `get_local_components` / `get_styles` take `limit`/`offset` (default 500) and return `total` so you can page through large catalogs.
 - **Prototyping** — frame-to-frame links with typed transitions and easing (`set_transition_reaction`, `set_smart_animate_reaction`), multi-action triggers (`set_reactions`, `upsert_reaction`), overlays, flows, and start points.
 - **Motion (timeline animation)** — animate properties over a frame's timeline rather than between frames: manual keyframe tracks for transform, opacity, radius, size, spacing and path trim, plus indexed fill/stroke/effect color tracks (`set_keyframe_track`), reusable animation styles (`list_animation_styles` / `apply_animation_style`), and timeline length (`set_timeline_duration`). Read it all back with `get_motion`. Requires Figma to have enabled Motion for your account; the tools say so plainly when it hasn't.
-- **Shaders** — `list_shaders` enumerates shader effects/fills available to the file.
+- **Shaders** — `list_shaders` enumerates shader effects/fills available to the file. `import_shader_by_id` materializes one into the file; `apply_shader` applies it as an effect, fill, or stroke (with `properties` keyed by name or definition id).
+- **Variable fonts** — `get_font_variation_axes` reads OpenType axes; `create_text` / `set_text_style` / `create_text_style` accept `variationSettings` (e.g. `{ wght: 550 }`).
 - **Live push events** — subscribe to `selectionchange` / `documentchange` so the agent can react to your selection or canvas without polling.
 - **Channel dashboard** — `list_channels` shows which file each connected channel belongs to.
-- **REST API extras** — file JSON, image downloads, bulk frame exports, file comments, and component search (with `FIGMA_TOKEN`).
+- **REST API extras** — file JSON, image downloads, bulk frame exports, file comments, and component search (with `FIGMA_TOKEN`). Video export of Motion frames (`MP4`/`GIF`/`WEBM` via `export_node_as_image`) is plugin-side and does not need a token.
 
 ---
 
@@ -99,6 +102,45 @@ Notes:
 - If your agent starts the MCP server automatically, do not also run `npm start` (only one process can use port `8787`).
 - After adding the config, restart your AI agent app so it picks up the new server.
 - **Running more than one MCP server?** Each server needs its own port *and* channel: set `FIGMA_BRIDGE_PORT` and `FIGMA_BRIDGE_CHANNEL` per server (e.g. server A → port `8787`, channel `default`; server B → port `8788`, channel `design`). Each server should use a port in the plugin's scan range (`8787–8797`) so it shows up in the plugin's **Discovered servers** dropdown — then in Figma just pick the server for the agent you want. One plugin UI connects to exactly one channel / MCP server.
+- MCP tools let the agent *call* Figma. The skill in the next section tells it *how* to use those tools — zip and upload it too.
+
+## Upload the Agent Skill (Required)
+
+The MCP config is not enough on its own. Zip the skill folder and upload that zip in your AI agent (Cursor, Claude, etc.) so the agent loads Figma write-bridge rules.
+
+1. Zip **`skills/figma-write-bridge/`** — the folder that *contains* `SKILL.md`, not the repo root and not the parent `skills/` directory.
+2. Confirm the zip root is `SKILL.md` (open the zip: you should see `SKILL.md` immediately, not `figma-write-bridge/SKILL.md`).
+3. In your AI agent, upload / import that `.zip` as a skill (the agent's "Skills" or "Upload skill" UI).
+4. Restart or reload the agent if it does not pick up new skills automatically.
+
+PowerShell (from the repo root):
+
+```powershell
+Compress-Archive -Path "skills\figma-write-bridge\*" -DestinationPath "figma-write-bridge-skill.zip" -Force
+```
+
+macOS / Linux:
+
+```bash
+(cd skills/figma-write-bridge && zip -r ../../figma-write-bridge-skill.zip .)
+```
+
+The folder looks like this:
+
+```
+skills/figma-write-bridge/
+├── SKILL.md          # always-on rules (~90 lines)
+├── setup.md          # preconditions and channels
+├── library.md        # file-library catalog
+├── layout.md         # auto layout, hug/fill, placement, default fills
+├── schema.md         # closed schema + error table
+├── handoff.md        # screen annotations
+├── tools.md          # full tool catalog
+├── heuristics.md     # product-designer rules
+└── playbooks.md      # copy / screen / component / prototype / motion
+```
+
+`SKILL.md` links those files one level deep; the agent should read only the file the current step needs. Re-zip and re-upload after you pull skill updates.
 
 ## Target Frames (Safety)
 `set_target_frame` / `get_target_frames` / `clear_target_frames` let the agent record which frame(s) you intend it to work in. Target-frame scoping is **enforced by the plugin**: when target frame(s) are set, write/delete actions targeting nodes outside those frame(s) are rejected with an error (create actions use the target frame as their host when one is set). A small, explicit set of delete/reset/clear actions is allowed by default (deleting a node, a page, a variable, a variable mode, or a component property/slot, and clearing prototype reactions) so the agent can actually make the changes you ask for — everything else matching "delete/remove/reset/clear" is blocked.
