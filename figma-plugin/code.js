@@ -17,7 +17,7 @@ const defaultHostPort = `${defaultHost}:${defaultPort}`;
 
 const scanPortStart = 8787;
 const scanPortCount = 11;
-const scanTimeoutMs = 400;
+const scanTimeoutMs = 1200;
 
 const uiHtml = `<!doctype html>
 <html>
@@ -84,6 +84,10 @@ const uiHtml = `<!doctype html>
         font-size: 12px; outline: none; font-family: inherit;
       }
       select:focus { border-color: var(--accent); }
+      select:disabled { opacity: 0.6; cursor: default; }
+      input[readonly] { opacity: 0.7; cursor: default; }
+      .manual-fields { display: flex; flex-direction: column; gap: 14px; }
+      .manual-fields[hidden] { display: none; }
       .row { display: flex; gap: 8px; }
       .row > * { flex: 1; min-width: 0; }
       button {
@@ -130,21 +134,18 @@ const uiHtml = `<!doctype html>
 
       <div class="field">
         <label for="serverList">Discovered servers</label>
-        <div class="row">
-          <select id="serverList">
-            <option value="">Scanning for local MCP servers…</option>
-          </select>
-          <button id="scan" style="flex: 0 0 auto; min-width: 62px;">Scan</button>
-        </div>
-        <div class="hint">Pick a running agent/MCP server to auto-fill and connect. Ports 8787–8797 are scanned.</div>
+        <select id="serverList">
+          <option value="">Scanning for local MCP servers…</option>
+        </select>
+        <div class="hint" id="discoverHint">Scanned automatically on launch. Pick a server to connect.</div>
       </div>
 
-      <div class="field">
-        <label for="wsUrl">Server (host:port)</label>
-        <input id="wsUrl" placeholder="localhost:8787" />
-        <div class="hint" id="wsHint"></div>
-      </div>
-      <div class="row">
+      <div id="manualFields" class="manual-fields" hidden>
+        <div class="field">
+          <label for="wsUrl">Server (host:port)</label>
+          <input id="wsUrl" placeholder="localhost:8787" />
+          <div class="hint" id="wsHint"></div>
+        </div>
         <div class="field">
           <label for="channel">Channel</label>
           <input id="channel" placeholder="default" />
@@ -176,14 +177,15 @@ const uiHtml = `<!doctype html>
       const dotEl = document.getElementById("dot");
       const logEl = document.getElementById("log");
       const serverList = document.getElementById("serverList");
-      const scanBtn = document.getElementById("scan");
+      const manualFields = document.getElementById("manualFields");
+      const discoverHintEl = document.getElementById("discoverHint");
       const undoBtn = document.getElementById("undo");
       const redoBtn = document.getElementById("redo");
       const historyHintEl = document.getElementById("historyHint");
 
       wsUrlInput.value = "${defaultHostPort}";
       channelInput.value = "${defaultChannel}";
-      setDetailHint();
+      setManualMode(false);
 
       let ws = null;
       const pending = new Map();
@@ -230,13 +232,27 @@ const uiHtml = `<!doctype html>
       function setDetailHint() {
         const el = document.getElementById("wsHint");
         if (!el) return;
-        el.textContent =
-          "Default: ws://${defaultHostPort} · Channel: ${defaultChannel} · " +
-          "pick a server from Discovered servers or type a custom host:port";
+        el.textContent = "Enter a host:port and channel, then Connect.";
       }
 
-      // Servers discovered by the main thread (scanServers) and offered in the
-      // dropdown. Selecting one fills Server + Channel and connects.
+      function setDiscoverHint(text) {
+        if (discoverHintEl) discoverHintEl.textContent = text;
+      }
+
+      function setManualMode(enabled, reason) {
+        if (manualFields) manualFields.hidden = !enabled;
+        wsUrlInput.readOnly = !enabled;
+        channelInput.readOnly = !enabled;
+        if (enabled) {
+          setDetailHint();
+          setDiscoverHint(reason || "Could not connect automatically. Enter host:port and channel below.");
+        } else {
+          setDiscoverHint("Scanned automatically on launch. Pick a server to connect.");
+        }
+      }
+
+      // Servers discovered by UI health probes (main-thread scan is fallback).
+      // Selecting one fills Server + Channel and connects.
       let discoveredServers = [];
 
       function serverLabel(server) {
@@ -247,6 +263,14 @@ const uiHtml = `<!doctype html>
         return label;
       }
 
+      function applyServerSelection(index, shouldConnect) {
+        const server = discoveredServers[index];
+        if (!server) return;
+        wsUrlInput.value = (server.host || "localhost") + ":" + server.port;
+        channelInput.value = server.channel || "default";
+        if (shouldConnect) connect();
+      }
+
       function populateServers(servers) {
         discoveredServers = Array.isArray(servers) ? servers : [];
         serverList.textContent = "";
@@ -255,6 +279,7 @@ const uiHtml = `<!doctype html>
           opt.value = "";
           opt.textContent = "No servers found on ports ${scanPortStart}–${scanPortStart + scanPortCount - 1}";
           serverList.appendChild(opt);
+          setManualMode(true, "No local MCP servers found. Enter host:port and channel, then Connect.");
           return;
         }
         for (let i = 0; i < discoveredServers.length; i += 1) {
@@ -263,28 +288,78 @@ const uiHtml = `<!doctype html>
           opt.textContent = serverLabel(discoveredServers[i]);
           serverList.appendChild(opt);
         }
+        serverList.value = "0";
+        setManualMode(false);
+        applyServerSelection(0, true);
       }
 
-      function requestScan() {
+      const scanStart = ${scanPortStart};
+      const scanCount = ${scanPortCount};
+      const scanMs = ${scanTimeoutMs};
+
+      function connectableHostUi(host) {
+        const value = String(host || "").trim();
+        if (!value || value === "127.0.0.1" || value === "::1" || value === "0.0.0.0") return "localhost";
+        return value;
+      }
+
+      async function probeHealthUi(port) {
+        try {
+          const controller = new AbortController();
+          const timer = setTimeout(function () { controller.abort(); }, scanMs);
+          const res = await fetch("http://${defaultHost}:" + port + "/health", { signal: controller.signal });
+          clearTimeout(timer);
+          if (!res.ok) return null;
+          const data = await res.json();
+          if (!data || data.name !== "figma-write-bridge") return null;
+          const host = connectableHostUi(data.host);
+          return {
+            host: host,
+            port: Number(data.port) || port,
+            wsUrl: "ws://" + host + ":" + (Number(data.port) || port),
+            channel: typeof data.channel === "string" && data.channel ? data.channel : "default",
+            connectedChannels: Array.isArray(data.connectedChannels) ? data.connectedChannels : []
+          };
+        } catch (_err) {
+          return null;
+        }
+      }
+
+      async function scanServersUi() {
+        const checks = [];
+        for (let i = 0; i < scanCount; i += 1) checks.push(probeHealthUi(scanStart + i));
+        const results = await Promise.all(checks);
+        const servers = [];
+        for (let i = 0; i < results.length; i += 1) {
+          if (results[i]) servers.push(results[i]);
+        }
+        servers.sort(function (a, b) { return a.port - b.port; });
+        return servers;
+      }
+
+      async function requestScan() {
         serverList.textContent = "";
         const opt = document.createElement("option");
         opt.value = "";
         opt.textContent = "Scanning…";
         serverList.appendChild(opt);
+        const servers = await scanServersUi();
+        if (servers.length) {
+          populateServers(servers);
+          return;
+        }
+        // Fallback: main-thread fetch does not need CORS (old servers without
+        // Access-Control-Allow-Origin). Figma's sandbox fetch cannot take
+        // AbortSignal, so that path times out with Promise.race instead.
         parent.postMessage({ pluginMessage: { type: "scanServers" } }, "*");
       }
 
       serverList.onchange = () => {
         const raw = serverList.value;
         if (raw === "") return;
-        const server = discoveredServers[Number(raw)];
-        if (!server) return;
-        wsUrlInput.value = (server.host || "localhost") + ":" + server.port;
-        channelInput.value = server.channel || "default";
-        connect();
+        setManualMode(false);
+        applyServerSelection(Number(raw), true);
       };
-
-      scanBtn.onclick = requestScan;
 
       // One plugin UI connects to exactly one channel / MCP server. The channel
       // defaults to "default"; set it to the same value the MCP server was
@@ -326,6 +401,7 @@ const uiHtml = `<!doctype html>
       function connect() {
         const url = normalizeServerUrl(wsUrlInput.value);
         if (!url) {
+          setManualMode(true, "Enter a server address like localhost:8787, then Connect.");
           setStatus("Disconnected", "err", "Enter a server address like localhost:8787", false);
           return;
         }
@@ -350,6 +426,7 @@ const uiHtml = `<!doctype html>
           reconnectDelayMs = 800;
           currentChannel = resolveChannel();
           sendJoin(socket);
+          setManualMode(false);
           setStatus("Connected to server in channel: " + currentChannel, "ok", connectedDetail(), true);
           log("Connected to " + currentUrl + " in channel: " + currentChannel);
         };
@@ -362,6 +439,9 @@ const uiHtml = `<!doctype html>
             return;
           }
           const rejected = event && event.code === 1008;
+          if (rejected) {
+            setManualMode(true, "Connection rejected. Check the channel, or enter host:port and channel below.");
+          }
           setStatus("Reconnecting...", "busy", rejected ? "Connection rejected (check channel) — retrying" : "Attempt again in " + reconnectDelayMs + "ms", true);
           const nextDelay = reconnectDelayMs;
           reconnectDelayMs = Math.min(5000, reconnectDelayMs * 2);
@@ -373,6 +453,7 @@ const uiHtml = `<!doctype html>
 
         socket.onerror = () => {
           if (connectionEpoch !== epoch) return;
+          setManualMode(true, "Could not reach the server. Enter host:port and channel, then Connect.");
           setStatus("Error connecting", "err", "Is the server running on " + currentUrl + "?", true);
           try { socket.close(); } catch (err) {}
         };
@@ -493,14 +574,7 @@ const uiHtml = `<!doctype html>
       };
       // Ask for the current depths on load so the buttons start in the right state.
       parent.postMessage({ pluginMessage: { type: "undoState" } }, "*");
-      // Auto-connect on load using the prepopulated default values. If it fails
-      // to reach the server, the onclose handler keeps retrying automatically.
-      try {
-        connect();
-      } catch (err) {
-        setStatus("Disconnected", "err", "Auto-connect error: " + (err && err.message ? err.message : String(err)), false);
-        log("Auto-connect error: " + (err && err.message ? err.message : String(err)));
-      }
+      requestScan();
     </script>
   </body>
 </html>`;
@@ -527,12 +601,18 @@ function connectableHost(host) {
 
 async function probeHealth(port) {
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), scanTimeoutMs);
-    const res = await fetch(`http://${defaultHost}:${port}/health`, { signal: controller.signal });
-    clearTimeout(timer);
-    if (!res.ok) return null;
-    const data = await res.json();
+    // Figma's sandbox fetch does not accept FetchOptions.signal (see FetchOptions
+    // in the plugin API). Passing AbortSignal makes every probe throw, so the
+    // dropdown always shows "No servers found".
+    const timeout = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error("timeout")), scanTimeoutMs);
+    });
+    const res = await Promise.race([
+      fetch(`http://${defaultHost}:${port}/health`),
+      timeout
+    ]);
+    if (!res || !res.ok) return null;
+    const data = typeof res.json === "function" ? await res.json() : JSON.parse(await res.text());
     if (!data || data.name !== "figma-write-bridge") return null;
     const host = connectableHost(data.host);
     return {
@@ -562,9 +642,8 @@ async function scanServers() {
   return servers;
 }
 
-try {
-  setTimeout(() => { scanServers(); }, 500);
-} catch (_err) {}
+// Discovery runs in the UI on load (same HTTP stack as WebSocket). The main
+// thread only scans when the UI finds nothing and posts scanServers.
 
 // ---------------------------------------------------------------------------
 // Target-frame enforcement + push events

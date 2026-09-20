@@ -237,7 +237,22 @@ function readNumberArg(name, fallback) {
   return Number.isFinite(value) ? value : fallback;
 }
 
+function setCorsHeaders(res) {
+  // Plugin UI is a null-origin iframe; without CORS, browser fetch of /health
+  // fails and the Discovered servers dropdown stays empty.
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Max-Age", "600");
+}
+
 const httpServer = createServer((req, res) => {
+  setCorsHeaders(res);
+  if (req.method === "OPTIONS") {
+    res.statusCode = 204;
+    res.end();
+    return;
+  }
   if (req.method === "GET" && (req.url === "/health" || req.url === "/health/")) {
     res.setHeader("Content-Type", "application/json");
     res.end(
