@@ -1,8 +1,11 @@
 {
-  "name": "Figma Write Bridge (Local)",
+  "name": "Figma Write Bridge",
   "api": "1.0.0",
   "main": "code.js",
-  "editorType": ["figma"],
+  "id": "1688941529396872430",
+  "editorType": [
+    "figma"
+  ],
   "documentAccess": "dynamic-page",
   "networkAccess": {
     "allowedDomains": [
