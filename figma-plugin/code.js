@@ -234,6 +234,36 @@ const uiHtml = `<!doctype html>
         logEl.scrollTop = logEl.scrollHeight;
       }
 
+      function describeAction(action, payload) {
+        const name = String(action || "unknown");
+        const p = payload && typeof payload === "object" ? payload : null;
+        if (!p) return name;
+        const bits = [];
+        const push = (label, value) => {
+          if (value === undefined || value === null || value === "") return;
+          const text = typeof value === "string" || typeof value === "number" || typeof value === "boolean"
+            ? String(value)
+            : Array.isArray(value)
+              ? value.length + " items"
+              : null;
+          if (text) bits.push(label + "=" + text);
+        };
+        push("node", p.nodeId || p.id);
+        push("nodes", Array.isArray(p.nodeIds) ? p.nodeIds.length + " ids" : undefined);
+        push("name", p.name);
+        push("parent", p.parentNodeId);
+        push("text", typeof p.text === "string" ? (p.text.length > 40 ? p.text.slice(0, 40) + "…" : p.text) : undefined);
+        push("channel", p.channel);
+        push("path", p.localPath);
+        push("format", p.format);
+        push("key", p.componentKey || p.componentSetKey || p.styleKey || p.variableKey);
+        if (!bits.length) {
+          const keys = Object.keys(p);
+          if (keys.length) bits.push(keys.slice(0, 3).join(", ") + (keys.length > 3 ? "…" : ""));
+        }
+        return bits.length ? name + " (" + bits.join(", ") + ")" : name;
+      }
+
       function connectedDetail() {
         const parts = ["Server: " + currentUrl];
         if (fileNameInfo) parts.push("File: " + fileNameInfo);
@@ -498,8 +528,9 @@ const uiHtml = `<!doctype html>
           }
           if (msg.type !== "command" || typeof msg.id !== "string") return;
           if (pending.size >= MAX_PENDING) pending.delete(pending.keys().next().value);
-          pending.set(msg.id, true);
-          log("> " + msg.action);
+          const actionLabel = describeAction(msg.action, msg.payload);
+          pending.set(msg.id, { action: msg.action, label: actionLabel });
+          log("> " + actionLabel);
           parent.postMessage({ pluginMessage: { type: "exec", id: msg.id, action: msg.action, payload: msg.payload } }, "*");
         };
       }
@@ -576,16 +607,23 @@ const uiHtml = `<!doctype html>
           return;
         }
         if (msg.type === "localResult") {
-          log(msg.ok ? "< " + msg.action + " ok" : "< " + msg.action + " error: " + (msg.error || ""));
+          const label = msg.action || "local";
+          log(msg.ok ? "< " + label + " ok" : "< " + label + " error: " + (msg.error || ""));
           return;
         }
         if (msg.type !== "result" || typeof msg.id !== "string") return;
         if (!pending.has(msg.id)) return;
+        const pendingEntry = pending.get(msg.id);
         pending.delete(msg.id);
         if (ws && ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: "result", id: msg.id, ok: msg.ok, result: msg.result, error: msg.error }));
         }
-        log(msg.ok ? "< " + msg.action + " ok" : "< " + msg.action + " error: " + (msg.error || ""));
+        const label =
+          (pendingEntry && pendingEntry.label) ||
+          msg.action ||
+          (pendingEntry && pendingEntry.action) ||
+          "command";
+        log(msg.ok ? "< " + label + " ok" : "< " + label + " error: " + (msg.error || ""));
       };
 
       toggleConnBtn.onclick = toggleConnection;
@@ -8012,13 +8050,15 @@ figma.ui.onmessage = async (msg) => {
     return;
   }
   if (msg.type !== "exec" || typeof msg.id !== "string") return;
+  const action = String(msg.action || "");
   try {
-    const result = await handleAction(String(msg.action), msg.payload || {});
-    figma.ui.postMessage({ type: "result", id: msg.id, ok: true, result });
+    const result = await handleAction(action, msg.payload || {});
+    figma.ui.postMessage({ type: "result", id: msg.id, action, ok: true, result });
   } catch (err) {
     figma.ui.postMessage({
       type: "result",
       id: msg.id,
+      action,
       ok: false,
       error: err && err.message ? String(err.message) : String(err)
     });
