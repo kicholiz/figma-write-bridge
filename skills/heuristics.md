@@ -205,7 +205,7 @@ Working rules:
 4. Positions are seconds. The first keyframe's value holds back to `t=0` and the last holds to the end, so don't add padding keyframes just to pin the resting state.
 5. Easing on a keyframe describes the move **into** it, so easing on the first keyframe is ignored. `HOLD` gives step interpolation. Use `EASE_IN_AND_OUT`, never `EASE_IN_OUT`.
 6. The bridge lengthens the timeline automatically when your animation runs past it (pass `extendTimeline: false` to opt out). It never shortens it on your behalf — that would truncate existing motion — so reach for `set_timeline_duration` deliberately, and only when the user asks.
-7. Prefer an existing animation style (`list_animation_styles` → `apply_animation_style`) when the file already uses one for that gesture, the same way you prefer an existing component over primitives.
+7. Prefer an existing animation style (`list_animation_styles` → `apply_animation_style`) when the file already uses one for that gesture, the same way you prefer an existing component over primitives. If the file has a custom style (`list_custom_animation_styles`), apply it with `type: "CUSTOM"`. Build a new custom style only when no preset matches, from Figma style ids — do not hand-author the same fade as raw keyframes and a custom style.
 
 ### For styling
 Prefer:

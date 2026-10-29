@@ -43,6 +43,7 @@ Omit `x` / `y`. Pass `index` for order and `layoutSizingHorizontal` / `Vertical`
 - Reorder with `insert_child` / `reparent_node` + `index`.
 - Stretch with `set_layout_sizing`, not `resize_node`.
 - Nested wrappers: omit `width`/`height` on `create_frame` so they do not ship at 320×200. Passing `layoutMode` also skips that default size.
+- `layoutWrap: "WRAP"` works on vertical auto layout as well as horizontal.
 
 ### Slots
 

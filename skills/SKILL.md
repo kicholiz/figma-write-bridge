@@ -80,6 +80,8 @@ Never echo a value you read back into a setter — [schema.md](schema.md).
 
 - Variable fonts: `get_font_variation_axes` then `variationSettings` on text tools
 - Shaders: `list_shaders` → `apply_shader` (imports if needed)
+- Custom motion: `list_animation_styles` → `create_custom_animation_style` → `apply_animation_style` with `type: "CUSTOM"`
+- Wide-gamut color: pass `sourceColor` or a CSS color (`oklch()`, `hsl()`) on fills, strokes, and gradient stops. `convert_color` projects it without editing the file
 - Motion export: `export_node_as_image` with `MP4` / `GIF` / `WEBM`
 - Clicks between screens → prototype reactions. Fades/slides on an element → Motion keyframes on a **descendant**
 - `>3` related edits → `run_batch` (checkpoint first if blast radius is real)

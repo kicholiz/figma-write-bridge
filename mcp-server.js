@@ -826,6 +826,15 @@ const ALLOWED_MCP_TOOLS = new Set([
   "apply_animation_style",
   "remove_animation_style",
   "set_timeline_duration",
+  "list_custom_animation_styles",
+  "create_custom_animation_style",
+  "add_animation_entry",
+  "remove_animation_entry",
+  "delete_custom_animation_style",
+  "reorder_custom_animation_style",
+  "reorder_custom_animation_folder",
+  "normalize_spring",
+  "convert_color",
   "list_shaders",
   "import_shader_by_id",
   "apply_shader",
@@ -885,6 +894,18 @@ const ALLOWED_MCP_TOOLS = new Set([
 ]);
 
 const MAX_RESULT_BYTES = Number(process.env.FIGMA_BRIDGE_MAX_RESULT_BYTES || "50000");
+
+const sourceColorSchema = z.object({
+  space: z.enum(["SRGB", "DISPLAY_P3", "HSL", "HSB", "OKLAB", "OKLCH"]),
+  r: z.number().optional(),
+  g: z.number().optional(),
+  b: z.number().optional(),
+  h: z.number().optional(),
+  s: z.number().optional(),
+  l: z.number().optional(),
+  a: z.number().optional(),
+  c: z.number().optional()
+}).describe("Authored color. SRGB/DISPLAY_P3 use r,g,b. HSL uses h,s,l. HSB uses h,s,b. OKLAB uses l,a,b (a is the axis, not alpha). OKLCH uses l,c,h.");
 
 // Catalog-enumeration tools must arrive whole: the workflow enumerates every
 // variable/style/component (and dumps tokens), so capping them would silently
@@ -1303,7 +1324,7 @@ server.registerTool(
   "get_document_info",
   {
     title: "Get document info",
-    description: "Get information about the current Figma document."
+    description: "Get the current page, every page, fileKey, and documentColorProfile (LEGACY, SRGB, or DISPLAY_P3)."
   },
   async () => {
     const result = await sendCommand("get_document_info", {});
@@ -1405,6 +1426,8 @@ server.registerTool(
       index: z.number().optional().describe("Child index inside the parent. Use this to order items in auto layout."),
       ignoreAutoLayout: z.boolean().optional().describe("If true, overlay with absolute x/y inside an auto-layout parent."),
       fillHex: z.string().optional().describe("Solid fill hex like #FFFFFF. Omit for transparent layout containers."),
+      color: z.string().optional().describe("CSS color such as oklch(), hsl(), or lab(). Calls figma.util.solidPaint."),
+      sourceColor: sourceColorSchema.optional(),
       r: z.number().optional(),
       g: z.number().optional(),
       b: z.number().optional(),
@@ -1445,6 +1468,8 @@ server.registerTool(
       layoutSizingHorizontal: z.string().optional().describe("FIXED | HUG | FILL"),
       layoutSizingVertical: z.string().optional().describe("FIXED | HUG | FILL"),
       fillsHex: z.string().optional(),
+      color: z.string().optional().describe("CSS color such as oklch(), hsl(), or lab(). Calls figma.util.solidPaint."),
+      sourceColor: sourceColorSchema.optional(),
       r: z.number().optional(),
       g: z.number().optional(),
       b: z.number().optional()
@@ -1461,7 +1486,7 @@ server.registerTool(
   {
     title: "Set fill color",
     description:
-      "Set or clear a node's solid fill. Prefer applying styles/variables when available. Pass clear:true (or fills:[]) to remove fills from layout containers that should be transparent. Also accepts fillHex.",
+      "Set or clear a node's solid fill. Prefer applying styles/variables when available. Pass clear:true (or fills:[]) to remove fills from layout containers that should be transparent. Also accepts fillHex, a CSS color string, or sourceColor (SRGB, DISPLAY_P3, HSL, HSB, OKLAB, OKLCH) which is applied through figma.util.solidPaint so the authored color space is preserved.",
     inputSchema: {
       nodeId: z.string(),
       r: z.number().optional(),
@@ -1469,6 +1494,8 @@ server.registerTool(
       b: z.number().optional(),
       opacity: z.number().optional(),
       fillHex: z.string().optional(),
+      color: z.string().optional().describe("CSS color such as oklch(), hsl(), or lab()."),
+      sourceColor: sourceColorSchema.optional(),
       clear: z.boolean().optional().describe("Remove all fills (transparent).")
     }
   },
@@ -1813,7 +1840,7 @@ server.registerTool(
   {
     title: "Set stroke color",
     description:
-      "Set or clear a node's stroke. Color via hex/strokeHex or r/g/b (0..1 or 0..255), optional strokeWeight, strokeAlign (CENTER|INSIDE|OUTSIDE), dashPattern (e.g. [4,4]), strokeCap (NONE|ROUND|SQUARE), strokeJoin (MITER|BEVEL|ROUND), or styleId to apply a paint style. Pass clear:true to remove strokes.",
+      "Set or clear a node's stroke. Color via hex/strokeHex, r/g/b (0..1 or 0..255), a CSS color string, or sourceColor (SRGB, DISPLAY_P3, HSL, HSB, OKLAB, OKLCH via figma.util.solidPaint). Optional strokeWeight, strokeAlign (CENTER|INSIDE|OUTSIDE), dashPattern (e.g. [4,4]), strokeCap (NONE|ROUND|SQUARE), strokeJoin (MITER|BEVEL|ROUND), or styleId to apply a paint style. Pass clear:true to remove strokes.",
     inputSchema: {
       nodeId: z.string(),
       r: z.number().optional(),
@@ -1822,6 +1849,8 @@ server.registerTool(
       opacity: z.number().optional(),
       hex: z.string().optional(),
       strokeHex: z.string().optional(),
+      color: z.string().optional().describe("CSS color such as oklch(), hsl(), or lab()."),
+      sourceColor: sourceColorSchema.optional(),
       strokeWeight: z.number().optional(),
       strokeAlign: z.string().optional().describe("CENTER | INSIDE | OUTSIDE"),
       dashPattern: z.array(z.number()).optional().describe("e.g. [4, 4] for dashed; [] for solid"),
@@ -3496,7 +3525,7 @@ server.registerTool(
   "list_animation_styles",
   {
     title: "List animation styles",
-    description: "List Figma's first-party animation styles, each with its styleId and the props it accepts. Call this before apply_animation_style to get a real styleId. Note `name` is an i18n key (e.g. 'motion.preset_name.position') and each entry in `props` is a documentation string describing the prop, not a value to send back.",
+    description: "List Figma's first-party animation styles, each with its styleId and the props it accepts. Call this before apply_animation_style (type FIGMA) or before adding an entry to a custom style. File-authored styles are a separate call: list_custom_animation_styles. Note `name` is an i18n key (e.g. 'motion.preset_name.position') and each entry in `props` is a documentation string describing the prop, not a value to send back.",
     inputSchema: {}
   },
   async () => {
@@ -3509,9 +3538,10 @@ server.registerTool(
   "apply_animation_style",
   {
     title: "Apply animation style",
-    description: "Apply a reusable animation style to a node. Identify it by styleId from list_animation_styles, or by styleName for a substring match. duration and timelineOffset are seconds and are top-level, not props. Returns the applied instance id needed by remove_animation_style. Verify the result against animationStyles in the response — applying a style does not materialize tracks into `animations`.",
+    description: "Apply a reusable animation style to a node. type FIGMA (default) uses styleId from list_animation_styles; type CUSTOM uses the id from list_custom_animation_styles and only accepts timelineOffset (the style owns duration and props). duration and timelineOffset are seconds and are top-level, not props. Returns the applied instance id needed by remove_animation_style. Verify against animationStyles — applying a style does not materialize tracks into `animations`.",
     inputSchema: {
       nodeId: z.string(),
+      type: z.enum(["FIGMA", "CUSTOM"]).optional(),
       styleId: z.string().optional(),
       styleName: z.string().optional(),
       name: z.string().optional(),
@@ -3524,6 +3554,163 @@ server.registerTool(
   },
   async (args) => {
     const result = await sendCommand("apply_animation_style", args);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "list_custom_animation_styles",
+  {
+    title: "List custom animation styles",
+    description: "List local custom Motion animation styles via figma.getLocalCustomAnimationStylesAsync. Each style is an ordered list of Figma animation entries. Use an entry's styleId from list_animation_styles when creating or editing one.",
+    inputSchema: {}
+  },
+  async () => {
+    const result = await sendCommand("list_custom_animation_styles", {});
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "create_custom_animation_style",
+  {
+    title: "Create custom animation style",
+    description: "Create a local custom animation style with figma.createCustomAnimationStyle, then add Figma animation entries with addAnimationEntryAsync. entries[].styleId comes from list_animation_styles. Name with slashes (Motion/Fade in) to put it in a folder.",
+    inputSchema: {
+      name: z.string().optional(),
+      description: z.string().optional(),
+      entries: z.array(z.object({
+        styleId: z.string(),
+        props: z.record(z.any()).optional()
+      })).optional()
+    }
+  },
+  async (args) => {
+    const result = await sendCommand("create_custom_animation_style", args);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "add_animation_entry",
+  {
+    title: "Add animation entry",
+    description: "Append a Figma animation to a local custom animation style via addAnimationEntryAsync. figmaStyleId is a styleId from list_animation_styles. styleId is the custom style's id.",
+    inputSchema: {
+      styleId: z.string().optional(),
+      name: z.string().optional(),
+      figmaStyleId: z.string(),
+      props: z.record(z.any()).optional()
+    }
+  },
+  async (args) => {
+    const result = await sendCommand("add_animation_entry", args);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "remove_animation_entry",
+  {
+    title: "Remove animation entry",
+    description: "Remove one entry from a local custom animation style via removeAnimationEntry. entryId comes from the style's animationEntries.",
+    inputSchema: {
+      styleId: z.string().optional(),
+      name: z.string().optional(),
+      entryId: z.string()
+    }
+  },
+  async (args) => {
+    const result = await sendCommand("remove_animation_entry", args);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "delete_custom_animation_style",
+  {
+    title: "Delete custom animation style",
+    description: "Delete a local custom animation style. Requires confirmDelete=true.",
+    inputSchema: {
+      styleId: z.string().optional(),
+      name: z.string().optional(),
+      confirmDelete: z.boolean()
+    }
+  },
+  async (args) => {
+    const result = await sendCommand("delete_custom_animation_style", args);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "reorder_custom_animation_style",
+  {
+    title: "Reorder custom animation style",
+    description: "Move a local custom animation style after another in the same folder via moveLocalCustomAnimationStyleAfter. Omit referenceStyleId to move it first.",
+    inputSchema: {
+      styleId: z.string().optional(),
+      name: z.string().optional(),
+      referenceStyleId: z.string().optional(),
+      referenceName: z.string().optional()
+    }
+  },
+  async (args) => {
+    const result = await sendCommand("reorder_custom_animation_style", args);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "reorder_custom_animation_folder",
+  {
+    title: "Reorder custom animation folder",
+    description: "Move a custom-animation style folder after another via moveLocalCustomAnimationFolderAfter. Folders are the slash-delimited name prefix (Motion/Enter), not the style name. Omit referenceFolder to move the folder first in its parent.",
+    inputSchema: {
+      targetFolder: z.string(),
+      referenceFolder: z.string().optional()
+    }
+  },
+  async (args) => {
+    const result = await sendCommand("reorder_custom_animation_folder", args);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "normalize_spring",
+  {
+    title: "Normalize spring",
+    description: "Convert physical spring mass, stiffness, and damping into Motion's normalized bounce (0 to 1) via figma.motion.physicalSpringToNormalized.",
+    inputSchema: {
+      mass: z.number().positive(),
+      stiffness: z.number().positive(),
+      damping: z.number().positive()
+    }
+  },
+  async (args) => {
+    const result = await sendCommand("normalize_spring", args);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "convert_color",
+  {
+    title: "Convert color",
+    description: "Project a color into the document profile by calling figma.util.rgb, figma.util.rgba, and figma.util.solidPaint. Accepts a CSS color (oklch, hsl, lab, rgb), hex, r/g/b, or sourceColor. Does not edit the file. Returns the RGB projection plus any preserved sourceColor.",
+    inputSchema: {
+      color: z.string().optional(),
+      hex: z.string().optional(),
+      r: z.number().optional(),
+      g: z.number().optional(),
+      b: z.number().optional(),
+      alpha: z.number().optional(),
+      sourceColor: sourceColorSchema.optional()
+    }
+  },
+  async (args) => {
+    const result = await sendCommand("convert_color", args);
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -3701,7 +3888,7 @@ server.registerTool(
   "create_variable",
   {
     title: "Create variable",
-    description: "Create a local variable in a collection and set values by mode. resolvedType: COLOR, FLOAT, STRING, BOOLEAN, EASING, or TIMING — EASING and TIMING hold motion easing curves and durations, letting a design system tokenize animation alongside color and spacing.",
+    description: "Create a local variable in a collection and set values by mode. resolvedType: COLOR, FLOAT, STRING, BOOLEAN, EASING, or TIMING. COLOR values may be hex, {r,g,b}, a CSS color, {r,g,b,sourceColor}, or a composed color {color, opacity} where at least one side is a variable alias and opacity is a percentage (60 = 60%). Scope a FLOAT to ['COLOR_OPACITY'] so it only appears in color-opacity pickers. EASING and TIMING hold motion curves and durations.",
     inputSchema: {
       collectionId: z.string(),
       name: z.string(),
@@ -3730,7 +3917,7 @@ server.registerTool(
   "set_variable_values",
   {
     title: "Set variable values",
-    description: "Update a variable's values by mode.",
+    description: "Update a variable's values by mode. COLOR values accept hex, {r,g,b}, CSS colors, sourceColor, or a composed color {color, opacity} (opacity is a percentage; color or opacity must be a variable alias).",
     inputSchema: {
       variableId: z.string(),
       valuesByMode: z.record(z.any()),
@@ -3941,7 +4128,7 @@ server.registerTool(
   "set_layout_mode",
   {
     title: "Set layout mode",
-    description: "Set the layout mode and wrap behavior of a frame: NONE, HORIZONTAL, VERTICAL, or GRID. GRID is a full cell-based layout — configure its tracks with set_grid_layout and place children with set_grid_child_position. layoutWrap (NO_WRAP | WRAP) applies to HORIZONTAL only. Empty wrappers strip leftover default white fill unless clearFill is false.",
+    description: "Set the layout mode and wrap behavior of a frame: NONE, HORIZONTAL, VERTICAL, or GRID. GRID is a full cell-based layout — configure its tracks with set_grid_layout and place children with set_grid_child_position. layoutWrap (NO_WRAP | WRAP) applies to both HORIZONTAL and VERTICAL auto layout. Empty wrappers strip leftover default white fill unless clearFill is false.",
     inputSchema: {
       nodeId: z.string(),
       layoutMode: z.string(),
@@ -4293,14 +4480,21 @@ server.registerTool(
   "set_gradient_fill",
   {
     title: "Set gradient fill",
-    description: "Set a gradient fill (LINEAR, RADIAL, ANGULAR, DIAMOND) on a node. stops: [{position 0..1, color {r,g,b[,a]}}]. Optional from/to transform points (normalized), opacity, paintIndex.",
+    description: "Set a gradient fill (LINEAR, RADIAL, ANGULAR, DIAMOND) on a node. stops: [{position 0..1, color {r,g,b[,a], sourceColor?}}]. sourceColor is applied through figma.util.rgba so the authored color space is kept. Optional from/to transform points (normalized), opacity, paintIndex.",
     inputSchema: {
       nodeId: z.string(),
       gradientType: z.string().optional(),
       stops: z.array(
         z.object({
           position: z.number().optional(),
-          color: z.object({ r: z.number(), g: z.number(), b: z.number(), a: z.number().optional() }).optional()
+          color: z.object({
+            r: z.number().optional(),
+            g: z.number().optional(),
+            b: z.number().optional(),
+            a: z.number().optional(),
+            sourceColor: sourceColorSchema.optional()
+          }).optional(),
+          sourceColor: sourceColorSchema.optional()
         })
       ),
       from: z.object({ x: z.number().optional(), y: z.number().optional() }).optional(),
@@ -4319,7 +4513,7 @@ server.registerTool(
   "set_effects",
   {
     title: "Set effects",
-    description: "Set effects on a node. Pass effectStyleId to apply an existing style, or effects as a raw array. Supported types: DROP_SHADOW and INNER_SHADOW ({color, offset:{x,y}, radius, spread}; DROP_SHADOW also takes showShadowBehindNode), LAYER_BLUR and BACKGROUND_BLUR ({radius, blurType:'NORMAL'} or blurType:'PROGRESSIVE' with startRadius/startOffset/endOffset), NOISE ({color, noiseSize, density, noiseType:'MONOTONE'|'DUOTONE'|'MULTITONE'}), TEXTURE ({noiseSize, radius, clipToShape}), GLASS ({lightIntensity, lightAngle, refraction, depth, dispersion, radius}), and SHADER ({id, properties}) after the shader has been imported. Prefer apply_shader for shaders. Figma requires visible and blendMode on shadows and visible plus blurType on blurs; the bridge fills those in and strips any key the effect variant does not declare, so pass only the fields you care about and never echo back an effect read off another node. boundVariables.color can bind a variable to the shadow color.",
+    description: "Set effects on a node. Pass effectStyleId to apply an existing style, or effects as a raw array. Supported types: DROP_SHADOW and INNER_SHADOW ({color, offset:{x,y}, radius, spread}; DROP_SHADOW also takes showShadowBehindNode), LAYER_BLUR and BACKGROUND_BLUR ({radius, blurType:'NORMAL'} or blurType:'PROGRESSIVE' with startRadius/startOffset/endOffset), NOISE ({color, noiseSize, density, noiseType:'MONOTONE'|'DUOTONE'|'MULTITONE'}), TEXTURE ({noiseSize, radius, clipToShape}), GLASS ({lightIntensity, lightAngle, refraction, depth, dispersion, radius}), and SHADER ({id, properties}) after the shader has been imported. Prefer apply_shader for shaders. Shadow and noise colors accept sourceColor (SRGB, DISPLAY_P3, HSL, HSB, OKLAB, OKLCH), applied through figma.util.rgba. Figma requires visible and blendMode on shadows and visible plus blurType on blurs; the bridge fills those in and strips any key the effect variant does not declare, so pass only the fields you care about and never echo back an effect read off another node. boundVariables.color can bind a variable to the shadow color.",
     inputSchema: z
       .object({
         nodeId: z.string(),

@@ -14,6 +14,8 @@ The bridge normalizes every one of these payloads for you, so you generally just
 - **Transitions** — `DISSOLVE`, `SMART_ANIMATE`, and `SCROLL_ANIMATE` accept **only** `{type, duration, easing}`. Adding `direction` or `matchLayers` fails validation. Only `MOVE_IN`, `MOVE_OUT`, `PUSH`, `SLIDE_IN`, `SLIDE_OUT` take those two.
 - **Layout grids** — `sectionSize` is invalid when `alignment` is `STRETCH`; `offset` is invalid when `alignment` is `CENTER`.
 - **Solid paints** — opacity belongs on the paint (`{type:"SOLID", color:{r,g,b}, opacity:0.5}`), not as an `a` channel inside `color`.
+- **Color spaces** — `sourceColor` sits on the color (`{space:"OKLCH", l, c, h}` and the same for `SRGB`, `DISPLAY_P3`, `HSL`, `HSB`, `OKLAB`). The bridge calls `figma.util.solidPaint` / `rgba` / `rgb`. Do not invent `r`/`g`/`b` for a wide-gamut color; pass `sourceColor` or a CSS string and let Figma project them. `OKLAB.a` is the green–red axis, not alpha.
+- **Composed color variables** — `{color, opacity}` where at least one side is a variable alias. `opacity` is a percentage (`60`), not 0–1. A FLOAT limited to opacity pickers uses `scopes: ["COLOR_OPACITY"]`.
 - **Grid layout** — `gridAutoTracks` is `NONE`/`ROWS` and `gridItemsPositioning` is `MANUAL`/`ROW_AUTO_FLOW`; track types are `FLEX`/`FIXED`/`HUG`.
 - **Motion easing** — the transition easings plus `HOLD`. `EASE_IN_AND_OUT` is the correct spelling; `EASE_IN_OUT` is rejected, as are internal names like `OUT_CUBIC`.
 
@@ -51,6 +53,8 @@ Error messages worth recognizing:
 | `Action not allowed: <name>` | The plugin build predates the tool | Reload **Figma Write Bridge (Local)** in Figma Desktop |
 | `Shader not imported` | Applied a shader id that is not in the file yet | `import_shader_by_id` or `apply_shader` (it imports first) |
 | `Variable fonts are not available` | Figma Desktop is older than Plugin API Update 138 | Ask the user to update Figma Desktop |
+| `Custom animation styles are not available` | Figma Desktop is older than Plugin API Update 140 | Ask the user to update Figma Desktop |
+| `Color-space utilities are not available` | Figma Desktop is older than Plugin API Update 141 | Ask the user to update Figma Desktop |
 | `Motion APIs are not enabled for this Figma user` | The account lacks the Motion feature flag | Report it once and stop — do not retry. Prototype reactions still work |
 | `span exceeds grid column count` / the bridge's `columnSpan … exceeds the grid's N columns` | A grid child was given a span that runs past the last track | Raise `columnCount` via `set_grid_layout`, or reduce the span |
 | `Cannot set child to specified column span due to existing children in adjacent columns` | The span would cross a cell another child already occupies | Place and widen the spanning child before adding its neighbours, or move the blocking child first |

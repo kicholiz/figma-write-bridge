@@ -26,7 +26,7 @@ For `get_document_tree` the rows are a **pre-order traversal** with a `depth` co
 Pass `verbose: true` to any of the five to get the original array-of-objects (or nested tree) shape back.
 
 ### Read / Inspect
-- `get_document_info` — current page's name/id/type/fileKey, its child nodes, `currentPage`, plus a `pages` list covering **every** page in the file (id/name/childCount), so one call gives the full-page overview without a separate `get_all_pages`.
+- `get_document_info` — current page's name/id/type/fileKey, `documentColorProfile` (`LEGACY` / `SRGB` / `DISPLAY_P3`), its child nodes, `currentPage`, plus a `pages` list covering **every** page in the file (id/name/childCount), so one call gives the full-page overview without a separate `get_all_pages`.
 - `get_all_pages` — compact map of every page (id/name/childCount). Pass `includeTopLevel: true` to also list each page's top-level frames. Call once for a full-file overview.
 - `get_document_tree` — compact structural tree of the whole file (or one subtree). Every node is `{id, name, type}`; no extra fields unless requested. Default `maxDepth` is 3 to bound output; pass `fields: ["characters"]` to include TEXT content and a larger `maxDepth` for deeper expansion. Use `rootNodeId` to scope to a frame/page, `excludeTypes: ["VECTOR"]` to drop icon/vector noise, and `fields` to pull extra per-node values (e.g. `["fills","absoluteBoundingBox"]`) only when you need them. Returns a **columnar table** — see below.
 - `get_selection`
@@ -91,7 +91,7 @@ Pass `verbose: true` to any of the five to get the original array-of-objects (or
 - `resize_node` — set explicit `width`/`height` (either may be omitted). On TEXT, refuses hug auto-width unless you pass `textAutoResize` (`HEIGHT`/`NONE`) or `forceFixed`
 - `resize_to_fit` — two modes: (1) pass `targetNodeId` to scale the layer to fit inside that layer (aspect-preserving, centered; `fit: "contain"` letterboxes, `fit: "cover"` fills and crops); (2) omit `targetNodeId` to shrink-wrap the container tightly to its own children (Figma's "Resize to Fit"). Prefer this over `resize_node` when fitting content, not spec'ing a size.
 - `bring_to_front` / `send_to_back` — reorder a layer within its parent's z-order (children[0] = back-most, children[last] = front-most). Use to fix stacking without reparenting.
-- `set_fill_color` (`figma_set_solid_fill` is a shorthand) — also accepts `fillHex` and `clear: true` to remove fills
+- `set_fill_color` (`figma_set_solid_fill` is a shorthand) — also accepts `fillHex`, a CSS color (`color`, e.g. `oklch(...)`), `sourceColor` (`SRGB`, `DISPLAY_P3`, `HSL`, `HSB`, `OKLAB`, `OKLCH`), and `clear: true` to remove fills. `sourceColor` and CSS colors go through `figma.util.solidPaint` so the authored space is kept; `r`/`g`/`b` stay the document-profile projection. `convert_color` does the same projection without writing a node.
 - `set_stroke_color` — color (`hex`/`r,g,b`), `strokeWeight`, `strokeAlign` (CENTER|INSIDE|OUTSIDE), `dashPattern`, `strokeCap`, `strokeJoin`, `styleId`, or `clear: true`
 - `set_corner_radius`
 - `set_text_content` (`figma_set_text` is a shorthand alias)
@@ -100,7 +100,7 @@ Pass `verbose: true` to any of the five to get the original array-of-objects (or
 
 ### Fills & Effects
 - `set_image_fill` — IMAGE fill from a URL, raw base64, or a local file via `localPath` (the server reads the file to base64); `scaleMode` FILL/FIT/CROP/TILE, `paintIndex`, `rotation`
-- `set_gradient_fill` — LINEAR/RADIAL/ANGULAR/DIAMOND with `stops`, optional `from`/`to` transform points, `opacity`, `paintIndex`
+- `set_gradient_fill` — LINEAR/RADIAL/ANGULAR/DIAMOND with `stops`, optional `from`/`to` transform points, `opacity`, `paintIndex`. A stop color may include `sourceColor`; the bridge calls `figma.util.rgba` so the space is preserved. Effect colors (`set_effects`) accept the same `sourceColor` on `color`.
 - `set_effects` — raw effects or an existing `effectStyleId`; `boundVariables.color` binds a variable. Supported types: `DROP_SHADOW`, `INNER_SHADOW`, `LAYER_BLUR`, `BACKGROUND_BLUR` (both `blurType: "NORMAL"` and `"PROGRESSIVE"`), `NOISE` (`MONOTONE`/`DUOTONE`/`MULTITONE`), `TEXTURE`, `GLASS`, and `SHADER` (`{id, properties}` after import). Prefer `apply_shader` for shaders. Required keys are filled in for you — pass the values you care about and let the bridge complete the shape (see [schema.md](schema.md)).
 - `apply_fill_style` / `apply_stroke_style` — apply a local paint style to fills or strokes
 - `bind_color_variable_to_fill` / `bind_color_variable_to_stroke` — bind a COLOR variable to a paint
@@ -133,7 +133,7 @@ Pass `verbose: true` to any of the five to get the original array-of-objects (or
 
 ### Layout
 - `set_auto_layout` — bundled layoutMode/padding/gap/align + sizing (`layoutSizingHorizontal`/`Vertical` or `width`/`height` aliases: FIXED|HUG|FILL). Empty wrappers strip leftover default white unless `clearFill: false`
-- `set_layout_mode`
+- `set_layout_mode` — `layoutWrap: "WRAP"` works on both `HORIZONTAL` and `VERTICAL` auto layout
 - `set_padding`
 - `set_axis_align` — parent child alignment (MIN/CENTER/MAX/…); distinct from textAlign*
 - `set_layout_sizing` — FIXED|HUG|FILL via layoutSizing* or width/height; TEXT may also set `textAutoResize`
@@ -151,7 +151,10 @@ Distinct from prototype reactions: reactions link frames on click, Motion animat
 - `get_motion` — read timelines (durations in seconds), the current `playheadPosition` (seconds; undefined when no timeline is active), manual keyframe tracks, applied animation styles, and resolved animations, for given nodes or the current selection. Always start here.
 - `set_keyframe_track` — add/replace one track. `field` is a property (`TRANSLATION_X`/`_Y`/`_XY`, `ROTATION`, `SCALE_X`/`_Y`/`_XY`, `OPACITY`, `CORNER_RADIUS` and the per-corner variants, `STROKE_WEIGHT` and the per-border variants, `WIDTH`, `HEIGHT`, `STACK_*`/`GRID_*` spacing, `PATH_TRIM_START`/`_END`) — or `FILLS`/`STROKES`/`EFFECTS` **with a `paintIndex`** for color/effect animation.
 - `remove_keyframe_track` — drop one track by field, or `all: true` to clear them.
-- `list_animation_styles` / `apply_animation_style` / `remove_animation_style` — reusable animation presets. List first for a real `styleId`; `duration` and `timelineOffset` are seconds and top-level, not `props`. Verify against `animationStyles` in the response, not `animations`.
+- `list_animation_styles` / `apply_animation_style` / `remove_animation_style` — reusable animation presets. List first for a real `styleId`; `duration` and `timelineOffset` are seconds and top-level, not `props`. Verify against `animationStyles` in the response, not `animations`. Pass `type: "CUSTOM"` to apply a file-authored style (only `timelineOffset` is configurable).
+- `list_custom_animation_styles` / `create_custom_animation_style` / `add_animation_entry` / `remove_animation_entry` / `delete_custom_animation_style` — local custom Motion styles (`figma.createCustomAnimationStyle`, `getLocalCustomAnimationStylesAsync`, `addAnimationEntryAsync`, `removeAnimationEntry`). Each entry's `styleId` comes from `list_animation_styles`. Delete needs `confirmDelete: true`.
+- `reorder_custom_animation_style` / `reorder_custom_animation_folder` — `moveLocalCustomAnimationStyleAfter` / `moveLocalCustomAnimationFolderAfter`. Omit the reference to move the target first. Folder names are the slash prefix (`Motion/Enter`), not the style name.
+- `normalize_spring` — `figma.motion.physicalSpringToNormalized({mass, stiffness, damping})` → bounce from 0 to 1.
 - `set_timeline_duration` — set the containing top-level frame's timeline length in seconds.
 
 ### Shaders
@@ -198,7 +201,7 @@ A shader must be imported into the file before it can be applied. `list_shaders`
 
 ### Variables
 - `create_variable_collection`
-- `create_variable`
+- `create_variable` — COLOR values may be hex, `{r,g,b}`, a CSS color, `{r,g,b,sourceColor}`, or a composed color `{color, opacity}`. At least one of `color` and `opacity` must be a variable alias (`{type:"VARIABLE_ALIAS", id}` or a variable id). Opacity is a percentage (`60` = 60%). Set a FLOAT's `scopes` to `["COLOR_OPACITY"]` so it only shows in color-opacity pickers.
 - `set_variable_values`
 - `rename_variable`
 - `import_variable_by_key`
