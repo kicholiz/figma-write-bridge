@@ -943,6 +943,116 @@ function normalize01From01Or255(value) {
   return Math.max(0, Math.min(1, n));
 }
 
+const COLOR_SPACES = new Set(["SRGB", "DISPLAY_P3", "HSL", "HSB", "OKLAB", "OKLCH"]);
+
+function finiteNumber(value, label) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) throw new Error("Missing or invalid " + label);
+  return n;
+}
+
+function normalizeSourceColor(source) {
+  if (source === undefined || source === null || source === "") return null;
+  if (typeof source !== "object" || Array.isArray(source)) throw new Error("sourceColor must be an object with a space");
+  const space = String(source.space || source.colorSpace || "").toUpperCase();
+  if (!COLOR_SPACES.has(space)) {
+    throw new Error("Unsupported color space: " + (space || "(missing)") + " (expected SRGB, DISPLAY_P3, HSL, HSB, OKLAB, or OKLCH)");
+  }
+  if (space === "SRGB" || space === "DISPLAY_P3") {
+    return {
+      space,
+      r: finiteNumber(source.r, "sourceColor.r"),
+      g: finiteNumber(source.g, "sourceColor.g"),
+      b: finiteNumber(source.b, "sourceColor.b")
+    };
+  }
+  if (space === "HSL") {
+    return {
+      space,
+      h: finiteNumber(source.h, "sourceColor.h"),
+      s: finiteNumber(source.s, "sourceColor.s"),
+      l: finiteNumber(source.l, "sourceColor.l")
+    };
+  }
+  if (space === "HSB") {
+    return {
+      space,
+      h: finiteNumber(source.h, "sourceColor.h"),
+      s: finiteNumber(source.s, "sourceColor.s"),
+      b: finiteNumber(source.b, "sourceColor.b")
+    };
+  }
+  if (space === "OKLAB") {
+    return {
+      space,
+      l: finiteNumber(source.l, "sourceColor.l"),
+      a: finiteNumber(source.a, "sourceColor.a"),
+      b: finiteNumber(source.b, "sourceColor.b")
+    };
+  }
+  return {
+    space,
+    l: finiteNumber(source.l, "sourceColor.l"),
+    c: finiteNumber(source.c, "sourceColor.c"),
+    h: finiteNumber(source.h, "sourceColor.h")
+  };
+}
+
+function colorUtilsAvailable() {
+  return Boolean(
+    typeof figma !== "undefined" &&
+    figma.util &&
+    typeof figma.util.rgb === "function" &&
+    typeof figma.util.rgba === "function" &&
+    typeof figma.util.solidPaint === "function"
+  );
+}
+
+function assertColorUtils() {
+  if (!colorUtilsAvailable()) {
+    throw new Error("Color-space utilities are not available in this Figma build. Update Figma Desktop (Plugin API Update 141).");
+  }
+}
+
+function cssColorString(params) {
+  if (!params || typeof params !== "object") return "";
+  const raw = params.color !== undefined && params.color !== null
+    ? params.color
+    : params.cssColor;
+  if (raw === undefined || raw === null) return "";
+  return String(raw).trim();
+}
+
+function solidPaintFromParams(params) {
+  const p = params && typeof params === "object" ? params : {};
+  const nested = p.fillColor && typeof p.fillColor === "object" ? p.fillColor : null;
+  const source = p.sourceColor
+    ? normalizeSourceColor(p.sourceColor)
+    : (nested && nested.sourceColor ? normalizeSourceColor(nested.sourceColor) : null);
+  const css = cssColorString(p);
+  if (!source && !css) return null;
+  assertColorUtils();
+  let input;
+  if (css && !source) {
+    input = css;
+  } else if (source && !css && !(p.fillHex || p.fillsHex || p.hex || p.strokeHex) && p.r === undefined && !(nested && nested.r !== undefined)) {
+    input = source;
+  } else {
+    const hex = p.fillHex || p.fillsHex || p.hex || p.strokeHex;
+    const rgb = hex
+      ? hexToRgb01(String(hex))
+      : {
+          r: normalize01From01Or255(p.r !== undefined ? p.r : nested && nested.r),
+          g: normalize01From01Or255(p.g !== undefined ? p.g : nested && nested.g),
+          b: normalize01From01Or255(p.b !== undefined ? p.b : nested && nested.b)
+        };
+    input = Object.assign({}, rgb, { sourceColor: source });
+  }
+  const overrides = {};
+  if (p.opacity !== undefined && p.opacity !== null) overrides.opacity = normalize01From01Or255(p.opacity);
+  return figma.util.solidPaint(input, Object.keys(overrides).length ? overrides : undefined);
+}
+
 // ---------------------------------------------------------------------------
 // Font utilities
 // ---------------------------------------------------------------------------
@@ -1166,7 +1276,86 @@ function coerceVariableValue(resolvedType, value) {
   return value;
 }
 
-function applyValuesByModeToVariable(v, collection, valuesByMode) {
+function looksLikeComposedColor(value) {
+  return Boolean(
+    value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    value.type !== "VARIABLE_ALIAS" &&
+    "color" in value &&
+    "opacity" in value &&
+    !("r" in value)
+  );
+}
+
+async function materializeAlias(input) {
+  if (input === undefined || input === null) return null;
+  let id = "";
+  if (typeof input === "string") id = input;
+  else if (typeof input === "object" && (input.type === "VARIABLE_ALIAS" || input.variableId)) {
+    id = String(input.id || input.variableId || "");
+  }
+  if (!id) return null;
+  const variable = await figma.variables.getVariableByIdAsync(id);
+  if (!variable) throw new Error("Variable not found: " + id);
+  if (typeof figma.variables.createVariableAlias === "function") return figma.variables.createVariableAlias(variable);
+  return { type: "VARIABLE_ALIAS", id: variable.id };
+}
+
+async function materializeColorChannel(value) {
+  const alias = await materializeAlias(value);
+  if (alias) return alias;
+  if (typeof value === "string") {
+    const raw = value.trim();
+    if (/^(oklch|oklab|hsl|hsb|lab|color|rgb)\(/i.test(raw)) {
+      assertColorUtils();
+      return figma.util.rgb(raw);
+    }
+    return parseHexToRgb01(raw);
+  }
+  if (value && typeof value === "object" && value.sourceColor) {
+    const source = normalizeSourceColor(value.sourceColor);
+    assertColorUtils();
+    const hasRgb = value.r !== undefined && value.r !== null;
+    if (!hasRgb) return figma.util.rgb(source);
+    return figma.util.rgb(Object.assign({
+      r: normalize01From01Or255(value.r),
+      g: normalize01From01Or255(value.g),
+      b: normalize01From01Or255(value.b)
+    }, { sourceColor: source }));
+  }
+  return coerceVariableValue("COLOR", value);
+}
+
+async function materializeComposedColor(value) {
+  const colorAlias = await materializeAlias(value.color);
+  const opacityAlias = await materializeAlias(value.opacity);
+  if (!colorAlias && !opacityAlias) {
+    throw new Error("A composed color needs color or opacity to be a variable alias ({type:'VARIABLE_ALIAS', id} or a variable id). Opacity is a percentage, as in 60 for 60%.");
+  }
+  const color = colorAlias || await materializeColorChannel(value.color);
+  let opacity;
+  if (opacityAlias) opacity = opacityAlias;
+  else {
+    const n = Number(value.opacity);
+    if (!Number.isFinite(n)) throw new Error("Composed color opacity must be a percentage or a FLOAT variable alias");
+    opacity = n;
+  }
+  return { color, opacity };
+}
+
+async function materializeVariableValue(resolvedType, value) {
+  const type = resolvedType === undefined || resolvedType === null ? "" : String(resolvedType);
+  if (type === "COLOR" && looksLikeComposedColor(value)) return materializeComposedColor(value);
+  if (type === "COLOR" && value && typeof value === "object" && value.sourceColor) return materializeColorChannel(value);
+  if (type === "COLOR" && typeof value === "string" && /^(oklch|oklab|hsl|hsb|lab|color)\(/i.test(value.trim())) {
+    assertColorUtils();
+    return figma.util.rgb(value.trim());
+  }
+  return coerceVariableValue(resolvedType, value);
+}
+
+async function applyValuesByModeToVariable(v, collection, valuesByMode) {
   const failures = [];
   for (const [modeKey, value] of Object.entries(valuesByMode || {})) {
     const resolvedModeId = resolveModeIdFromCollection(collection, modeKey);
@@ -1174,7 +1363,7 @@ function applyValuesByModeToVariable(v, collection, valuesByMode) {
       failures.push(String(modeKey));
       continue;
     }
-    const coerced = coerceVariableValue(v && v.resolvedType, value);
+    const coerced = await materializeVariableValue(v && v.resolvedType, value);
     v.setValueForMode(String(resolvedModeId), coerced);
   }
   if (failures.length) {
@@ -1612,6 +1801,7 @@ async function getDocumentInfoFull() {
     id: page.id,
     type: page.type,
     fileKey: typeof figma.fileKey === "string" ? figma.fileKey : null,
+    documentColorProfile: readMaybe(figma.root, "documentColorProfile") || null,
     children: page.children.map((node) => ({ id: node.id, name: node.name, type: node.type })),
     currentPage: pageEntry(page),
     pages: figma.root.children.map(pageEntry)
@@ -1803,6 +1993,16 @@ function applySolidFillFromParams(node, params) {
     node.fills = params.fills.map((paint) => normalizePaint(paint));
     return { fillCount: node.fills.length };
   }
+  const authoredPaint = solidPaintFromParams(params);
+  if (authoredPaint) {
+    node.fills = [authoredPaint];
+    return {
+      fillCount: 1,
+      sourceColor: authoredPaint.color && authoredPaint.color.sourceColor
+        ? cloneJsonValue(authoredPaint.color.sourceColor)
+        : null
+    };
+  }
   if (params.fillHex || params.fillsHex) {
     const color = hexToRgb01(String(params.fillHex || params.fillsHex));
     const opacity = params.opacity === undefined || params.opacity === null ? 1 : normalize01From01Or255(params.opacity);
@@ -1886,7 +2086,7 @@ async function createTextNode(p) {
     text.textAlignVertical = align;
   }
 
-  if (p.fillsHex || (p.r !== undefined && p.g !== undefined && p.b !== undefined) || p.fillColor || p.fills) {
+  if (p.fillsHex || (p.r !== undefined && p.g !== undefined && p.b !== undefined) || p.fillColor || p.fills || p.sourceColor || p.color || p.cssColor) {
     applySolidFillFromParams(text, p);
   }
 
@@ -1939,6 +2139,9 @@ async function setStrokeColor(params) {
 
   if (params.strokes !== undefined && Array.isArray(params.strokes)) {
     node.strokes = params.strokes.map((paint) => normalizePaint(paint));
+  } else if (params.sourceColor || params.color || params.cssColor) {
+    const authored = solidPaintFromParams(params);
+    node.strokes = [authored];
   } else if (params.hex || params.strokeHex) {
     const color = hexToRgb01(String(params.hex || params.strokeHex));
     const opacity = params.opacity === undefined || params.opacity === null ? 1 : normalize01From01Or255(params.opacity);
@@ -2038,6 +2241,8 @@ function hasExplicitFill(params) {
   if (!params || typeof params !== "object") return false;
   const hex = params.fillHex || params.fillsHex;
   if (hex !== undefined && hex !== null && String(hex).trim() !== "") return true;
+  if (params.sourceColor) return true;
+  if (params.color || params.cssColor) return true;
   if (params.fillColor && typeof params.fillColor === "object") return true;
   if (params.r !== undefined && params.g !== undefined && params.b !== undefined) return true;
   if (Array.isArray(params.fills) && params.fills.length > 0) return true;
@@ -4961,24 +5166,45 @@ async function applyAnimationStyleAction(params) {
   }
   if (typeof node.applyAnimationStyle !== "function") throw new Error("Node does not support animation styles");
 
+  const styleType = String(p.type || p.styleType || "FIGMA").toUpperCase();
+  if (styleType !== "FIGMA" && styleType !== "CUSTOM") {
+    throw new Error("Unsupported animation style type: " + styleType + " (expected FIGMA or CUSTOM)");
+  }
+  const isCustom = styleType === "CUSTOM";
+
   let styleId = p.styleId ? String(p.styleId) : "";
   if (!styleId) {
     const wanted = String(p.styleName || "").toLowerCase();
-    if (!wanted) throw new Error("Missing styleId or styleName (list them with list_animation_styles)");
-    const match = ensureArray(figma.motion.figmaAnimationStyles())
-      .find((s) => String(s.name || "").toLowerCase().indexOf(wanted) >= 0);
-    if (!match) throw new Error("No animation style matching: " + p.styleName);
-    styleId = match.styleId;
+    if (!wanted) {
+      throw new Error("Missing styleId or styleName (list them with list_animation_styles or list_custom_animation_styles)");
+    }
+    if (isCustom) {
+      const match = ensureArray(await loadCustomAnimationStyles())
+        .find((s) => String(s.name || "").toLowerCase().indexOf(wanted) >= 0);
+      if (!match) throw new Error("No custom animation style matching: " + p.styleName);
+      styleId = match.id;
+    } else {
+      const match = ensureArray(figma.motion.figmaAnimationStyles())
+        .find((s) => String(s.name || "").toLowerCase().indexOf(wanted) >= 0);
+      if (!match) throw new Error("No animation style matching: " + p.styleName);
+      styleId = match.styleId;
+    }
   }
 
   const preset = {};
-  if (p.duration !== undefined && p.duration !== null) preset.duration = Number(p.duration);
-  if (p.timelineOffset !== undefined && p.timelineOffset !== null) preset.timelineOffset = Number(p.timelineOffset);
-  if (p.name !== undefined && p.name !== null) preset.name = String(p.name);
-  if (p.props && typeof p.props === "object") {
-    const props = Object.assign({}, p.props);
-    if (props.easing !== undefined) props.easing = normalizeMotionEasing(props.easing);
-    preset.props = props;
+  if (isCustom) {
+    preset.type = "CUSTOM";
+    if (p.timelineOffset !== undefined && p.timelineOffset !== null) preset.timelineOffset = Number(p.timelineOffset);
+  } else {
+    if (p.type || p.styleType) preset.type = "FIGMA";
+    if (p.duration !== undefined && p.duration !== null) preset.duration = Number(p.duration);
+    if (p.timelineOffset !== undefined && p.timelineOffset !== null) preset.timelineOffset = Number(p.timelineOffset);
+    if (p.name !== undefined && p.name !== null) preset.name = String(p.name);
+    if (p.props && typeof p.props === "object") {
+      const props = Object.assign({}, p.props);
+      if (props.easing !== undefined) props.easing = normalizeMotionEasing(props.easing);
+      preset.props = props;
+    }
   }
 
   const appliedId = Object.keys(preset).length ? node.applyAnimationStyle(styleId, preset) : node.applyAnimationStyle(styleId);
@@ -4996,6 +5222,7 @@ async function applyAnimationStyleAction(params) {
     success: true,
     nodeId: node.id,
     styleId,
+    styleType,
     appliedId: appliedId === undefined ? null : appliedId,
     timelineExtended,
 
@@ -5039,6 +5266,208 @@ async function setTimelineDurationAction(params) {
   const timelineId = p.timelineId ? String(p.timelineId) : timelines[0].id;
   node.setTimelineDuration(timelineId, duration);
   return { success: true, nodeId: node.id, timelineId, duration, timelines: safeMotionRead(() => node.timelines, []) };
+}
+
+function assertCustomAnimationApi() {
+  if (typeof figma.createCustomAnimationStyle !== "function" || typeof figma.getLocalCustomAnimationStylesAsync !== "function") {
+    throw new Error("Custom animation styles are not available in this Figma build. Update Figma Desktop (Plugin API Update 140).");
+  }
+}
+
+async function loadCustomAnimationStyles() {
+  assertMotionEnabled();
+  assertCustomAnimationApi();
+  return ensureArray(await figma.getLocalCustomAnimationStylesAsync());
+}
+
+function serializeAnimationEntry(entry) {
+  if (!entry || typeof entry !== "object") return entry;
+  return {
+    id: entry.id,
+    type: entry.type === undefined ? null : entry.type,
+    styleId: entry.styleId,
+    name: entry.name,
+    description: entry.description === undefined ? null : entry.description,
+    duration: entry.duration === undefined ? null : entry.duration,
+    timelineOffset: entry.timelineOffset === undefined ? null : entry.timelineOffset,
+    props: cloneJsonValue(entry.props)
+  };
+}
+
+function serializeCustomAnimationStyle(style) {
+  return {
+    id: style.id,
+    key: style.key,
+    name: style.name,
+    type: style.type,
+    description: style.description || "",
+    remote: Boolean(style.remote),
+    animationEntries: ensureArray(style.animationEntries).map(serializeAnimationEntry)
+  };
+}
+
+async function listCustomAnimationStyles() {
+  const styles = await loadCustomAnimationStyles();
+  return { success: true, styles: styles.map(serializeCustomAnimationStyle) };
+}
+
+async function resolveCustomAnimationStyle(params) {
+  const p = params && typeof params === "object" ? params : {};
+  const styles = await loadCustomAnimationStyles();
+  const id = p.styleId || p.id ? String(p.styleId || p.id) : "";
+  if (id) {
+    const found = styles.find((style) => style.id === id);
+    if (!found) throw new Error("Custom animation style not found: " + id);
+    return found;
+  }
+  const name = p.name || p.styleName ? String(p.name || p.styleName) : "";
+  if (!name) throw new Error("Missing styleId or name");
+  const exact = styles.filter((style) => style.name === name);
+  const matches = exact.length ? exact : styles.filter((style) => String(style.name || "").toLowerCase().indexOf(name.toLowerCase()) >= 0);
+  if (matches.length !== 1) {
+    throw new Error(
+      "Custom animation style " + (matches.length ? "matches more than one" : "not found") +
+      ": " + name + ". Pass styleId."
+    );
+  }
+  return matches[0];
+}
+
+function animationEntryProps(entry) {
+  if (!entry || !entry.props || typeof entry.props !== "object") return undefined;
+  const props = Object.assign({}, entry.props);
+  if (props.easing !== undefined) props.easing = normalizeMotionEasing(props.easing);
+  return props;
+}
+
+async function createCustomAnimationStyleAction(params) {
+  const p = params && typeof params === "object" ? params : {};
+  assertMotionEnabled();
+  assertCustomAnimationApi();
+  const style = figma.createCustomAnimationStyle();
+  if (p.name) style.name = String(p.name);
+  if (p.description !== undefined && p.description !== null) style.description = String(p.description);
+  const created = [];
+  for (const entry of ensureArray(p.entries)) {
+    const figmaStyleId = entry && (entry.styleId || entry.figmaStyleId) ? String(entry.styleId || entry.figmaStyleId) : "";
+    if (!figmaStyleId) throw new Error("Each entry needs styleId from list_animation_styles");
+    const added = await style.addAnimationEntryAsync(figmaStyleId, animationEntryProps(entry));
+    created.push(serializeAnimationEntry(added));
+  }
+  return { success: true, style: serializeCustomAnimationStyle(style), createdEntries: created };
+}
+
+async function addAnimationEntryAction(params) {
+  const p = params && typeof params === "object" ? params : {};
+  const style = await resolveCustomAnimationStyle(p);
+  const figmaStyleId = p.figmaStyleId || p.entryStyleId ? String(p.figmaStyleId || p.entryStyleId) : "";
+  if (!figmaStyleId) throw new Error("Missing figmaStyleId (a styleId from list_animation_styles)");
+  const added = await style.addAnimationEntryAsync(figmaStyleId, animationEntryProps(p));
+  return { success: true, style: serializeCustomAnimationStyle(style), entry: serializeAnimationEntry(added) };
+}
+
+async function removeAnimationEntryAction(params) {
+  const p = params && typeof params === "object" ? params : {};
+  const style = await resolveCustomAnimationStyle(p);
+  const entryId = p.entryId ? String(p.entryId) : "";
+  if (!entryId) throw new Error("Missing entryId (read it from animationEntries)");
+  style.removeAnimationEntry(entryId);
+  return { success: true, style: serializeCustomAnimationStyle(style), entryId };
+}
+
+async function deleteCustomAnimationStyleAction(params) {
+  const p = params && typeof params === "object" ? params : {};
+  if (!p.confirmDelete) throw new Error("confirmDelete must be true");
+  const style = await resolveCustomAnimationStyle(p);
+  const id = style.id;
+  const name = style.name;
+  style.remove();
+  return { success: true, styleId: id, name };
+}
+
+async function reorderCustomAnimationStyleAction(params) {
+  const p = params && typeof params === "object" ? params : {};
+  if (typeof figma.moveLocalCustomAnimationStyleAfter !== "function") {
+    throw new Error("Reordering custom animation styles is not available in this Figma build. Update Figma Desktop (Plugin API Update 140).");
+  }
+  const target = await resolveCustomAnimationStyle({ styleId: p.styleId || p.targetStyleId, name: p.name || p.targetName });
+  let reference = null;
+  if (p.referenceStyleId || p.referenceName) {
+    reference = await resolveCustomAnimationStyle({ styleId: p.referenceStyleId, name: p.referenceName });
+  }
+  figma.moveLocalCustomAnimationStyleAfter(target, reference);
+  return {
+    success: true,
+    styleId: target.id,
+    referenceStyleId: reference ? reference.id : null,
+    styles: (await loadCustomAnimationStyles()).map(serializeCustomAnimationStyle)
+  };
+}
+
+async function reorderCustomAnimationFolderAction(params) {
+  const p = params && typeof params === "object" ? params : {};
+  if (typeof figma.moveLocalCustomAnimationFolderAfter !== "function") {
+    throw new Error("Reordering custom animation folders is not available in this Figma build. Update Figma Desktop (Plugin API Update 140).");
+  }
+  const targetFolder = p.targetFolder ? String(p.targetFolder) : "";
+  if (!targetFolder) throw new Error("Missing targetFolder (slash-delimited folder path, without the style name)");
+  const reference = p.referenceFolder === undefined || p.referenceFolder === null || p.referenceFolder === ""
+    ? null
+    : String(p.referenceFolder);
+  figma.moveLocalCustomAnimationFolderAfter(targetFolder, reference);
+  return { success: true, targetFolder, referenceFolder: reference };
+}
+
+async function normalizeSpringAction(params) {
+  const p = params && typeof params === "object" ? params : {};
+  assertMotionEnabled();
+  if (!figma.motion || typeof figma.motion.physicalSpringToNormalized !== "function") {
+    throw new Error("physicalSpringToNormalized is not available in this Figma build.");
+  }
+  const mass = Number(p.mass);
+  const stiffness = Number(p.stiffness);
+  const damping = Number(p.damping);
+  if (![mass, stiffness, damping].every((n) => Number.isFinite(n) && n > 0)) {
+    throw new Error("mass, stiffness, and damping must be positive finite numbers");
+  }
+  const bounce = figma.motion.physicalSpringToNormalized({ mass, stiffness, damping });
+  return { success: true, bounce, mass, stiffness, damping };
+}
+
+async function convertColorAction(params) {
+  const p = params && typeof params === "object" ? params : {};
+  assertColorUtils();
+  const source = p.sourceColor ? normalizeSourceColor(p.sourceColor) : null;
+  const css = cssColorString(p);
+  let input;
+  if (css && !source) input = css;
+  else if (source && !css && p.r === undefined && !p.hex && !p.fillHex) input = source;
+  else if (source) {
+    const rgb = (p.hex || p.fillHex)
+      ? hexToRgb01(String(p.hex || p.fillHex))
+      : { r: normalize01From01Or255(p.r), g: normalize01From01Or255(p.g), b: normalize01From01Or255(p.b) };
+    input = Object.assign({}, rgb, { sourceColor: source });
+  } else if (p.hex || p.fillHex) input = String(p.hex || p.fillHex);
+  else if (p.r !== undefined) {
+    input = { r: normalize01From01Or255(p.r), g: normalize01From01Or255(p.g), b: normalize01From01Or255(p.b) };
+  } else {
+    throw new Error("Pass color (a CSS string), sourceColor, hex, or r/g/b");
+  }
+  const alpha = p.alpha === undefined || p.alpha === null ? undefined : Number(p.alpha);
+  const rgb = figma.util.rgb(input);
+  const rgba = figma.util.rgba(input, alpha);
+  const solid = figma.util.solidPaint(input);
+  return {
+    success: true,
+    documentColorProfile: readMaybe(figma.root, "documentColorProfile") || null,
+    rgb: cloneJsonValue(rgb),
+    rgba: cloneJsonValue(rgba),
+    solidPaint: {
+      type: solid.type,
+      color: cloneJsonValue(solid.color),
+      opacity: solid.opacity
+    }
+  };
 }
 
 async function listShaders(params) {
@@ -5282,6 +5711,19 @@ async function listVariableCollections() {
 function serializeVariableValue(value) {
   if (value && typeof value === "object") {
     if (value.type === "VARIABLE_ALIAS") return { type: "VARIABLE_ALIAS", id: String(value.id) };
+    if (looksLikeComposedColor(value)) {
+      return {
+        type: "COMPOSED_COLOR",
+        color: serializeVariableValue(value.color),
+        opacity: serializeVariableValue(value.opacity)
+      };
+    }
+    if ("r" in value && "g" in value && "b" in value) {
+      const out = { r: value.r, g: value.g, b: value.b };
+      if (value.a !== undefined && value.a !== null) out.a = value.a;
+      if (value.sourceColor) out.sourceColor = cloneJsonValue(value.sourceColor);
+      return out;
+    }
   }
   return value;
 }
@@ -5313,7 +5755,7 @@ async function listVariables(params) {
   } catch (err) {
     if (resolvedType) throw err;
     const all = [];
-    for (const type of ["COLOR", "FLOAT", "STRING", "BOOLEAN"]) {
+    for (const type of ["COLOR", "FLOAT", "STRING", "BOOLEAN", "EASING", "TIMING"]) {
       try { const part = await figma.variables.getLocalVariablesAsync(type); for (const v of part) all.push(v); } catch (_err) {}
     }
     vars = all;
@@ -5379,7 +5821,18 @@ function resolveVariableValue(value, modeId, varById, seen) {
     nextSeen.add(aliasId);
     return resolveVariableValue(tvv, modeId, varById, nextSeen);
   }
-  if (value && typeof value === "object" && "r" in value && "g" in value && "b" in value) return rgbaToHex01(value);
+  if (looksLikeComposedColor(value)) {
+    return {
+      type: "COMPOSED_COLOR",
+      color: resolveVariableValue(value.color, modeId, varById, seen),
+      opacity: resolveVariableValue(value.opacity, modeId, varById, seen)
+    };
+  }
+  if (value && typeof value === "object" && "r" in value && "g" in value && "b" in value) {
+    const hex = rgbaToHex01(value);
+    if (value.sourceColor) return { hex, sourceColor: cloneJsonValue(value.sourceColor) };
+    return hex;
+  }
   return value;
 }
 
@@ -5481,7 +5934,7 @@ async function createVariable(params) {
   if (params.description !== undefined && params.description !== null) v.description = String(params.description);
   if (params.scopes !== undefined && params.scopes !== null) v.scopes = ensureArray(params.scopes).map((x) => String(x));
   const valuesByMode = normalizeValuesByMode(params);
-  applyValuesByModeToVariable(v, collection, valuesByMode);
+  await applyValuesByModeToVariable(v, collection, valuesByMode);
   return { id: v.id, name: v.name, key: v.key, resolvedType: v.resolvedType, variableCollectionId: v.variableCollectionId, scopes: v.scopes };
 }
 
@@ -5493,7 +5946,7 @@ async function setVariableValues(params) {
   const collection = await figma.variables.getVariableCollectionByIdAsync(v.variableCollectionId);
   if (!collection) throw new Error("Variable collection not found: " + v.variableCollectionId);
   const valuesByMode = normalizeValuesByMode(params);
-  applyValuesByModeToVariable(v, collection, valuesByMode);
+  await applyValuesByModeToVariable(v, collection, valuesByMode);
   return { success: true, id: v.id, name: v.name };
 }
 
@@ -5752,6 +6205,7 @@ function countCompactTreeNodes(node) {
 function serializePaintLight(paint) {
   const item = { type: paint.type };
   if (paint.color) item.color = rgbaToHex(paint.color);
+  if (paint.color && paint.color.sourceColor) item.sourceColor = cloneJsonValue(paint.color.sourceColor);
   if (paint.opacity !== undefined && paint.opacity !== 1) item.opacity = roundNum(paint.opacity, 3);
   if (
     paint.type === "GRADIENT_LINEAR" ||
@@ -5760,10 +6214,14 @@ function serializePaintLight(paint) {
     paint.type === "GRADIENT_DIAMOND"
   ) {
     if (Array.isArray(paint.gradientStops) && paint.gradientStops.length) {
-      item.gradientStops = paint.gradientStops.map((stop) => ({
-        position: roundNum(stop.position, 3),
-        color: rgbaToHex(stop.color)
-      }));
+      item.gradientStops = paint.gradientStops.map((stop) => {
+        const entry = {
+          position: roundNum(stop.position, 3),
+          color: rgbaToHex(stop.color)
+        };
+        if (stop.color && stop.color.sourceColor) entry.sourceColor = cloneJsonValue(stop.color.sourceColor);
+        return entry;
+      });
     }
   }
   if (paint.imageRef) item.imageRef = paint.imageRef;
@@ -6024,12 +6482,25 @@ function base64ToBytes(b64) {
 
 function normalizeColorParts(color) {
   const c = color && typeof color === "object" ? color : {};
-  return {
+  const source = c.sourceColor ? normalizeSourceColor(c.sourceColor) : null;
+  const hasRgb = c.r !== undefined && c.r !== null && c.g !== undefined && c.g !== null && c.b !== undefined && c.b !== null;
+  if (source && !hasRgb) {
+    assertColorUtils();
+    return figma.util.rgba(source);
+  }
+  const out = {
     r: normalize01From01Or255(c.r),
     g: normalize01From01Or255(c.g),
     b: normalize01From01Or255(c.b),
     a: c.a === undefined || c.a === null ? 1 : normalize01From01Or255(c.a)
   };
+  if (source) {
+    if (colorUtilsAvailable()) {
+      return figma.util.rgba(Object.assign({ r: out.r, g: out.g, b: out.b, a: out.a }, { sourceColor: source }));
+    }
+    out.sourceColor = source;
+  }
+  return out;
 }
 
 async function resolveVariableRef(ref) {
@@ -6054,9 +6525,12 @@ function normalizePaint(p) {
   if (p.blendMode !== undefined && p.blendMode !== null) out.blendMode = String(p.blendMode);
 
   if (type === "SOLID") {
-    const c = normalizeColorParts(p.color);
+    const colorInput = p.color && typeof p.color === "object" ? Object.assign({}, p.color) : {};
+    if (p.sourceColor && !colorInput.sourceColor) colorInput.sourceColor = p.sourceColor;
+    const c = normalizeColorParts(colorInput);
 
     out.color = { r: c.r, g: c.g, b: c.b };
+    if (c.sourceColor) out.color.sourceColor = c.sourceColor;
     if (out.opacity === undefined && p.color && p.color.a !== undefined && p.color.a !== null) {
       out.opacity = normalize01From01Or255(p.color.a);
     }
@@ -6133,7 +6607,8 @@ function normalizeGradientStops(stops) {
   const arr = ensureArray(stops);
   if (!arr.length) throw new Error("Missing gradient stops");
   return arr.map((s, i) => {
-    const color = s && s.color ? s.color : {};
+    const color = s && s.color && typeof s.color === "object" ? Object.assign({}, s.color) : {};
+    if (s && s.sourceColor && !color.sourceColor) color.sourceColor = s.sourceColor;
     const position = s && s.position !== undefined && s.position !== null ? Number(s.position) : i / Math.max(arr.length - 1, 1);
     return {
       color: normalizeColorParts(color),
@@ -7700,7 +8175,12 @@ const ALLOWED_ACTIONS = new Set([
   "set_auto_layout", "set_layout_grids", "set_overflow_direction", "set_fixed_children",
   "set_grid_layout", "get_grid_layout", "set_grid_child_position", "reorder_grid_tracks",
   "get_motion", "set_keyframe_track", "remove_keyframe_track", "list_animation_styles",
-  "apply_animation_style", "remove_animation_style", "set_timeline_duration", "list_shaders",
+  "apply_animation_style", "remove_animation_style", "set_timeline_duration",
+  "list_custom_animation_styles", "create_custom_animation_style", "add_animation_entry",
+  "remove_animation_entry", "delete_custom_animation_style",
+  "reorder_custom_animation_style", "reorder_custom_animation_folder",
+  "normalize_spring", "convert_color",
+  "list_shaders",
   "import_shader_by_id", "apply_shader", "get_font_variation_axes",
   "move_node", "reparent_node", "get_parent_chain", "insert_child", "resize_node", "resize_to_fit",
   "delete_node", "delete_multiple_nodes",
@@ -7786,7 +8266,9 @@ async function dispatchAction(action, payload) {
       action !== "delete_variable_mode" &&
       action !== "delete_variable_collection" &&
       action !== "remove_keyframe_track" &&
-      action !== "remove_animation_style"
+      action !== "remove_animation_style" &&
+      action !== "remove_animation_entry" &&
+      action !== "delete_custom_animation_style"
     ) {
       throw new Error(`Blocked action: ${action}`);
     }
@@ -7891,6 +8373,15 @@ async function dispatchAction(action, payload) {
     case "apply_animation_style": return await applyAnimationStyleAction(p);
     case "remove_animation_style": return await removeAnimationStyleAction(p);
     case "set_timeline_duration": return await setTimelineDurationAction(p);
+    case "list_custom_animation_styles": return await listCustomAnimationStyles();
+    case "create_custom_animation_style": return await createCustomAnimationStyleAction(p);
+    case "add_animation_entry": return await addAnimationEntryAction(p);
+    case "remove_animation_entry": return await removeAnimationEntryAction(p);
+    case "delete_custom_animation_style": return await deleteCustomAnimationStyleAction(p);
+    case "reorder_custom_animation_style": return await reorderCustomAnimationStyleAction(p);
+    case "reorder_custom_animation_folder": return await reorderCustomAnimationFolderAction(p);
+    case "normalize_spring": return await normalizeSpringAction(p);
+    case "convert_color": return await convertColorAction(p);
     case "list_shaders": return await listShaders(p);
     case "import_shader_by_id": return await importShaderByIdAction(p);
     case "apply_shader": return await applyShader(p);
