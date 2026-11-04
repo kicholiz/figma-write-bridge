@@ -7248,8 +7248,167 @@ async function replaceAllInstances(params) {
   return { success: true, dryRun, sourceComponentKey: sourceKey, targetComponentKey: targetKey, swappedCount: swapped.length, skippedCount: skipped.length, swapped };
 }
 
+async function describeExplicitCollection(collectionId, cache) {
+  if (cache[collectionId]) return cache[collectionId];
+  const collection = await figma.variables.getVariableCollectionByIdAsync(collectionId);
+  let hasColor = false;
+  if (collection && Array.isArray(collection.variableIds)) {
+    const ids = collection.variableIds.slice(0, 40);
+    for (let i = 0; i < ids.length; i += 1) {
+      const variable = await figma.variables.getVariableByIdAsync(ids[i]);
+      if (variable && variable.resolvedType === "COLOR") {
+        hasColor = true;
+        break;
+      }
+    }
+  }
+  const name = collection ? collection.name : null;
+  const info = {
+    id: collectionId,
+    name,
+    found: Boolean(collection),
+    isColor: Boolean(collection) && (Boolean(name && /color|colour/i.test(name)) || hasColor),
+    modes: collection ? collection.modes.map((m) => ({ modeId: m.modeId, name: m.name })) : [],
+    collection
+  };
+  cache[collectionId] = info;
+  return info;
+}
+
+function explicitModeName(info, modeId) {
+  const hit = info.modes.find((m) => m.modeId === modeId);
+  return hit ? hit.name : modeId;
+}
+
+// modeId __INSPECT_EXPLICIT__ reports scene-node color modes.
+// modeId __CLEAR_EXPLICIT__ removes them so only page-level modes remain.
+async function clearSceneExplicitVariableModes(params) {
+  const p = params && typeof params === "object" ? params : {};
+  const dryRun = String(p.modeId) !== "__CLEAR_EXPLICIT__";
+  const collectionFilter = p.collectionId ? String(p.collectionId) : "";
+  const rootNodeId = p.rootNodeId ? String(p.rootNodeId) : "";
+  await figma.loadAllPagesAsync();
+
+  let roots = figma.root.children.slice();
+  if (rootNodeId) {
+    const root = await figma.getNodeByIdAsync(normalizeFigmaNodeId(rootNodeId));
+    if (!root) throw new Error("Node not found: " + rootNodeId);
+    roots = [root];
+  }
+
+  const collectionCache = {};
+  const keptPages = [];
+  const byPage = [];
+  const samples = [];
+  const errors = [];
+  let clearedCount = 0;
+  let skippedNonColor = 0;
+
+  for (let ri = 0; ri < roots.length; ri += 1) {
+    const root = roots[ri];
+    const page = root.type === "PAGE" ? root : pageOf(root);
+    if (root.type === "PAGE") {
+      const explicit = root.explicitVariableModes || {};
+      const ids = Object.keys(explicit);
+      const modes = [];
+      for (let i = 0; i < ids.length; i += 1) {
+        const info = await describeExplicitCollection(ids[i], collectionCache);
+        modes.push({
+          collectionId: ids[i],
+          collectionName: info.name,
+          modeId: explicit[ids[i]],
+          modeName: explicitModeName(info, explicit[ids[i]]),
+          isColor: info.isColor
+        });
+      }
+      keptPages.push({ pageId: root.id, pageName: root.name, modes });
+    }
+
+    const nodes = [];
+    if (root.type !== "PAGE" && root.explicitVariableModes && Object.keys(root.explicitVariableModes).length) {
+      nodes.push(root);
+    }
+    if ("findAll" in root) {
+      const found = root.findAll((n) => {
+        const modes = n.explicitVariableModes;
+        return Boolean(modes && Object.keys(modes).length);
+      });
+      for (let i = 0; i < found.length; i += 1) nodes.push(found[i]);
+    }
+
+    let pageCleared = 0;
+    for (let ni = 0; ni < nodes.length; ni += 1) {
+      const node = nodes[ni];
+      if (!node || node.type === "PAGE" || node.removed) continue;
+      const explicit = Object.assign({}, node.explicitVariableModes || {});
+      const collectionIds = Object.keys(explicit);
+      for (let ci = 0; ci < collectionIds.length; ci += 1) {
+        const collectionId = collectionIds[ci];
+        const info = await describeExplicitCollection(collectionId, collectionCache);
+        if (collectionFilter && info.id !== collectionFilter && info.name !== collectionFilter) continue;
+        if (!info.isColor) {
+          skippedNonColor += 1;
+          continue;
+        }
+        if (!info.collection) {
+          errors.push({ nodeId: node.id, collectionId, error: "Collection not found" });
+          continue;
+        }
+        if (!dryRun) {
+          try {
+            node.clearExplicitVariableModeForCollection(info.collection);
+          } catch (err) {
+            errors.push({
+              nodeId: node.id,
+              collectionId,
+              error: err instanceof Error ? err.message : String(err)
+            });
+            continue;
+          }
+        }
+        pageCleared += 1;
+        clearedCount += 1;
+        if (samples.length < 30) {
+          samples.push({
+            nodeId: node.id,
+            name: node.name,
+            type: node.type,
+            pageName: page ? page.name : null,
+            collectionName: info.name,
+            modeName: explicitModeName(info, explicit[collectionId])
+          });
+        }
+      }
+    }
+    byPage.push({
+      pageId: page ? page.id : null,
+      pageName: page ? page.name : null,
+      explicitColorModes: pageCleared
+    });
+  }
+
+  return {
+    success: true,
+    dryRun,
+    clearedCount,
+    skippedNonColor,
+    errorCount: errors.length,
+    errors: errors.slice(0, 20),
+    byPage,
+    keptPages,
+    samples,
+    collections: Object.keys(collectionCache).map((id) => {
+      const info = collectionCache[id];
+      return { id: info.id, name: info.name, found: info.found, isColor: info.isColor, modes: info.modes };
+    })
+  };
+}
+
 async function setVariableMode(params) {
   const p = params && typeof params === "object" ? params : {};
+  if (p.modeId === "__INSPECT_EXPLICIT__" || p.modeId === "__CLEAR_EXPLICIT__") {
+    return await clearSceneExplicitVariableModes(p);
+  }
   const nodeIds = ensureArray(p.nodeIds).map((x) => String(x));
   const rootNodeId = p.rootNodeId ? String(p.rootNodeId) : null;
   let targets = [];
