@@ -324,7 +324,12 @@ function connectedChannelsInfo() {
   for (const [name, socket] of channels.entries()) {
     if (!isOpenSocket(socket)) continue;
     const meta = socketMeta.get(socket) || {};
-    out.push({ channel: name, fileKey: meta.fileKey || null, fileName: meta.fileName || null });
+    out.push({
+      channel: name,
+      fileKey: meta.fileKey || null,
+      fileName: meta.fileName || null,
+      allowSelectAndFocus: meta.allowSelectAndFocus !== false
+    });
   }
   return out;
 }
@@ -356,6 +361,17 @@ function getActiveSocket() {
   const socket = channels.get(activeChannel);
   if (isOpenSocket(socket)) return socket;
   return getFallbackSocket();
+}
+
+// Whether the bridge may change the author's selection / viewport in the active
+// channel. The plugin UI's "Follow AI" toggle sets this; when false the agent must
+// not rely on select/zoom side effects (set_focus / set_selections report
+// selectionDisabled).
+function activeSelectAndFocus() {
+  const socket = getActiveSocket();
+  if (!socket) return true;
+  const meta = socketMeta.get(socket) || {};
+  return meta.allowSelectAndFocus !== false;
 }
 
 function getSocketForChannel(channelName) {
@@ -450,7 +466,12 @@ function sendCommand(action, payload, socketOverride) {
         actionName !== "delete_variable" &&
         actionName !== "clear_reactions" &&
         actionName !== "delete_page" &&
-        actionName !== "delete_variable_mode"
+        actionName !== "delete_variable_mode" &&
+        actionName !== "delete_variable_collection" &&
+        actionName !== "remove_keyframe_track" &&
+        actionName !== "remove_animation_style" &&
+        actionName !== "remove_animation_entry" &&
+        actionName !== "delete_custom_animation_style"
       ) {
         throw new Error(`Blocked action: ${actionName}`);
       }
@@ -521,6 +542,7 @@ wss.on("connection", (socket) => {
       const meta = socketMeta.get(socket) || {};
       meta.fileKey = typeof msg.fileKey === "string" && msg.fileKey ? String(msg.fileKey) : null;
       meta.fileName = typeof msg.fileName === "string" && msg.fileName ? String(msg.fileName) : null;
+      if (typeof msg.allowSelectAndFocus === "boolean") meta.allowSelectAndFocus = msg.allowSelectAndFocus;
       socketMeta.set(socket, meta);
       clientSockets.delete(socket);
       unclaimedSockets.delete(socket);
@@ -529,6 +551,13 @@ wss.on("connection", (socket) => {
         socket.send(JSON.stringify({ type: "system", channel, message: `Joined channel: ${channel}` }));
       } catch {}
       if (targetFrameIds.size > 0) sendTargetFramesSync(socket);
+      return;
+    }
+
+    if (msg.type === "selection_policy") {
+      const meta = socketMeta.get(socket) || {};
+      meta.allowSelectAndFocus = msg.allowSelectAndFocus !== false;
+      socketMeta.set(socket, meta);
       return;
     }
 
@@ -708,6 +737,7 @@ const ALLOWED_MCP_TOOLS = new Set([
   "get_selection",
   "get_node_info",
   "get_nodes_info",
+  "get_node_css",
   "get_selection_context",
   "get_changes_since",
   "run_batch",
@@ -890,7 +920,13 @@ const ALLOWED_MCP_TOOLS = new Set([
   "extract_component_set",
   "bring_to_front",
   "send_to_back",
-  "search_components"
+  "search_components",
+  "get_transform_3d",
+  "set_transform_3d",
+  "get_transform_origin",
+  "set_transform_origin",
+  "get_scene_3d",
+  "set_scene_3d"
 ]);
 
 const MAX_RESULT_BYTES = Number(process.env.FIGMA_BRIDGE_MAX_RESULT_BYTES || "50000");
@@ -1040,7 +1076,7 @@ server.registerTool(
   "figma_bridge_status",
   {
     title: "Figma bridge status",
-    description: "Returns whether the local Figma plugin is connected, the active channel, and every connected channel with the Figma file it belongs to. The channel defaults to \"default\" and is tied to this server's FIGMA_BRIDGE_CHANNEL; the plugin UI joins that channel (one plugin = one channel/server)."
+    description: "Returns whether the local Figma plugin is connected, the active channel, and every connected channel with the Figma file it belongs to. The channel defaults to \"default\" and is tied to this server's FIGMA_BRIDGE_CHANNEL; the plugin UI joins that channel (one plugin = one channel/server). Also reports allowSelectAndFocus — the plugin UI's \"Follow AI\" toggle: true (default) lets the bridge select and zoom; false means the author is editing the same file, so no action changes their selection or viewport and set_focus / set_selections return selectionDisabled."
   },
   async () => ({
     content: [
@@ -1051,6 +1087,7 @@ server.registerTool(
             wsUrl: `ws://${wsHost}:${wsPort}`,
             activeChannel,
             connected: Boolean(getActiveSocket()),
+            allowSelectAndFocus: activeSelectAndFocus(),
             connectedChannels: connectedChannelsInfo().map((c) => c.channel),
             channels: connectedChannelsInfo()
           }
@@ -1786,7 +1823,7 @@ server.registerTool(
   "set_focus",
   {
     title: "Set focus",
-    description: "Select a single node and scroll the viewport to it. Switches to the node's page first, so this works with ids returned by a cross-page find_nodes. Use this to show the user what you just built or found.",
+    description: "Select a single node and scroll the viewport to it. Switches to the node's page first, so this works with ids returned by a cross-page find_nodes. Use this to show the user what you just built or found. Returns { success: false, selectionDisabled: true } and changes nothing when the plugin UI's \"Follow AI\" toggle is off (the author is editing the same file).",
     inputSchema: {
       nodeId: z.string()
     }
@@ -1801,7 +1838,7 @@ server.registerTool(
   "set_selections",
   {
     title: "Set selections",
-    description: "Set selection to multiple nodes and scroll viewport to show them. Switches to the first node's page; Figma scopes selection to one page, so nodes on other pages are reported in skippedOnOtherPages.",
+    description: "Set selection to multiple nodes and scroll viewport to show them. Switches to the first node's page; Figma scopes selection to one page, so nodes on other pages are reported in skippedOnOtherPages. Returns { success: false, selectionDisabled: true } unchanged when the plugin UI's \"Follow AI\" toggle is off.",
     inputSchema: {
       nodeIds: z.array(z.string())
     }
@@ -3446,6 +3483,126 @@ server.registerTool(
   }
 );
 
+server.registerTool(
+  "get_transform_3d",
+  {
+    title: "Get 3D transform",
+    description: "Read a node's 3D transform surface: transform3d (its FIXED_ORDER translateZ/rotateX/rotateY/rotateZ or NONE, plus the read-only FREEFORM an imported file may carry), transformOrigin (x/y as PERCENT or PIXELS), and scene3d (perspective + preserve3d for frames/components/instances). Also reports supportsTransform3d. 3D transforms do not change layout size or relativeTransform. Requires Figma Plugin API Update 142+; returns nulls on older builds.",
+    inputSchema: {
+      nodeId: z.string()
+    }
+  },
+  async ({ nodeId }) => {
+    const result = await sendCommand("get_transform_3d", { nodeId });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "set_transform_3d",
+  {
+    title: "Set 3D transform",
+    description: "Set a node's transform3d (Plugin API Update 142, beta). Pass type:'NONE' to remove an existing transform, or type:'FIXED_ORDER' with translateZ (px) and rotateX/rotateY/rotateZ (degrees), applied as CSS translateZ() rotateX() rotateY() rotateZ() in that order. Any of the four numbers may be negative. Fields you omit keep the node's current value, so you can change one axis at a time; on a node with no transform yet, omitted fields default to 0. backfaceVisible/visible default true. FREEFORM is import-only and cannot be assigned. Does not change the node's layout size. Supported on frames, groups, components, instances, shapes, text and vector nodes.",
+    inputSchema: {
+      nodeId: z.string(),
+      type: z.enum(["NONE", "FIXED_ORDER"]).optional(),
+      transform3d: z.object({
+        type: z.enum(["NONE", "FIXED_ORDER"]).optional(),
+        translateZ: z.number().optional(),
+        rotateX: z.number().optional(),
+        rotateY: z.number().optional(),
+        rotateZ: z.number().optional(),
+        backfaceVisible: z.boolean().optional(),
+        visible: z.boolean().optional()
+      }).optional(),
+      translateZ: z.number().optional(),
+      rotateX: z.number().optional(),
+      rotateY: z.number().optional(),
+      rotateZ: z.number().optional(),
+      backfaceVisible: z.boolean().optional(),
+      visible: z.boolean().optional()
+    }
+  },
+  async (args) => {
+    const result = await sendCommand("set_transform_3d", args);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "get_transform_origin",
+  {
+    title: "Get transform origin",
+    description: "Read a node's transformOrigin — the CSS transform-origin point for its 3D transform, as x/y each with a unit (PERCENT or PIXELS) and a value. Defaults to 50%/50%. Returns null when the node does not support it.",
+    inputSchema: {
+      nodeId: z.string()
+    }
+  },
+  async ({ nodeId }) => {
+    const result = await sendCommand("get_transform_origin", { nodeId });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "set_transform_origin",
+  {
+    title: "Set transform origin",
+    description: "Set a node's transformOrigin (Plugin API Update 142, beta): the anchor point its 3D transform rotates/scales around, like CSS transform-origin. Pass x and/or y as {unit:'PERCENT'|'PIXELS', value}; an omitted axis keeps its current value. Changing the origin can move the rendered node even without changing the transform itself. Values outside the node's bounds are allowed.",
+    inputSchema: {
+      nodeId: z.string(),
+      transformOrigin: z.object({
+        x: z.object({ unit: z.enum(["PERCENT", "PIXELS"]), value: z.number() }).optional(),
+        y: z.object({ unit: z.enum(["PERCENT", "PIXELS"]), value: z.number() }).optional()
+      }).optional(),
+      x: z.object({ unit: z.enum(["PERCENT", "PIXELS"]), value: z.number() }).optional(),
+      y: z.object({ unit: z.enum(["PERCENT", "PIXELS"]), value: z.number() }).optional()
+    }
+  },
+  async (args) => {
+    const result = await sendCommand("set_transform_origin", args);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "get_scene_3d",
+  {
+    title: "Get 3D scene",
+    description: "Read a frame/component/instance's scene3d — perspective (px, like CSS perspective) and preserve3d (like CSS transform-style: preserve-3d). Returns scene3d:null when no scene is configured. Instances inherit the main component's scene until overridden. Also reports supportsScene3d.",
+    inputSchema: {
+      nodeId: z.string()
+    }
+  },
+  async ({ nodeId }) => {
+    const result = await sendCommand("get_scene_3d", { nodeId });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "set_scene_3d",
+  {
+    title: "Set 3D scene",
+    description: "Configure a container's 3D scene (frames, components, instances; Plugin API Update 142, beta). perspective is a distance in px (negative disables perspective; -1 is the default; 0 or values <1 render as 1px) and preserve3d toggles CSS transform-style: preserve-3d over flat, letting children share one 3D space. Pass scene3d:null to clear a scene — on an instance this opts it out of its main component's inherited scene. WARNING: when preserve3d is true, opacity, blendMode, effects (including effect styles), and clipsContent have NO visual effect on that container.",
+    inputSchema: {
+      nodeId: z.string(),
+      scene3d: z.object({
+        perspective: z.number().optional(),
+        preserve3d: z.boolean().optional(),
+        visible: z.boolean().optional()
+      }).nullable().optional(),
+      perspective: z.number().optional(),
+      preserve3d: z.boolean().optional(),
+      visible: z.boolean().optional()
+    }
+  },
+  async (args) => {
+    const result = await sendCommand("set_scene_3d", args);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
 const motionEasingSchema = z.union([
   z.string(),
   z.object({
@@ -3482,7 +3639,7 @@ server.registerTool(
   "set_keyframe_track",
   {
     title: "Set keyframe track",
-    description: "Add or replace one manual keyframe track on a node. `field` is a property name (TRANSLATION_X/Y/XY, ROTATION, SCALE_X/Y/XY, OPACITY, CORNER_RADIUS, STROKE_WEIGHT, WIDTH, HEIGHT, STACK_* / GRID_* spacing, PATH_TRIM_START/END) or FILLS/STROKES/EFFECTS with a paintIndex. Transform fields COMPOSE with the node's resting transform (neutral 0, or 1 for scale); the others replace the value. timelinePosition is in seconds; the first keyframe's value holds back to t=0 and the last holds to the end, so no padding keyframes are needed. Easing on a keyframe describes the move INTO it, and adds 'HOLD' for step interpolation. The containing timeline is extended when the animation runs past it unless extendTimeline is false. Animate descendants: a top-level frame owns the timeline rather than animating on it, so keyframes there do nothing and are refused unless allowTopLevelFrame is true. Color and effect animation uses field FILLS, STROKES, or EFFECTS together with paintIndex.",
+    description: "Add or replace one manual keyframe track on a node. `field` is a property name (TRANSLATION_X/Y/XY, ROTATION, SCALE_X/Y/XY, OPACITY, CORNER_RADIUS, STROKE_WEIGHT, WIDTH, HEIGHT, STACK_* / GRID_* spacing, PATH_TRIM_START/END, or the 3D fields TRANSFORM_3D_TRANSLATION_Z / TRANSFORM_3D_ROTATION_X/Y/Z and SCENE_3D_PERSPECTIVE) or FILLS/STROKES/EFFECTS with a paintIndex. Transform fields COMPOSE with the node's resting transform (neutral 0, or 1 for scale); the others replace the value. The 3D fields need a FIXED_ORDER transform3d on the node (FREEFORM cannot be keyframed); Z translation is px and rotations are degrees. timelinePosition is in seconds; the first keyframe's value holds back to t=0 and the last holds to the end, so no padding keyframes are needed. Easing on a keyframe describes the move INTO it, and adds 'HOLD' for step interpolation. The containing timeline is extended when the animation runs past it unless extendTimeline is false. Animate descendants: a top-level frame owns the timeline rather than animating on it, so keyframes there do nothing and are refused unless allowTopLevelFrame is true. Color and effect animation uses field FILLS, STROKES, or EFFECTS together with paintIndex.",
     inputSchema: {
       nodeId: z.string(),
       field: z.string(),
@@ -4296,6 +4453,21 @@ server.registerTool(
   },
   async () => {
     const result = await sendCommand("redo", {});
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.registerTool(
+  "get_node_css",
+  {
+    title: "Get node CSS",
+    description: "Return a node's CSS as a flat property map by calling node.getCSSAsync (Plugin API Update 136). Useful for handing a layer off to code or checking computed values. Read-only; requires Figma Desktop with a Plugin API version that exposes getCSSAsync.",
+    inputSchema: {
+      nodeId: z.string()
+    }
+  },
+  async ({ nodeId }) => {
+    const result = await sendCommand("get_node_css", { nodeId });
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );

@@ -207,6 +207,16 @@ Working rules:
 6. The bridge lengthens the timeline automatically when your animation runs past it (pass `extendTimeline: false` to opt out). It never shortens it on your behalf — that would truncate existing motion — so reach for `set_timeline_duration` deliberately, and only when the user asks.
 7. Prefer an existing animation style (`list_animation_styles` → `apply_animation_style`) when the file already uses one for that gesture, the same way you prefer an existing component over primitives. If the file has a custom style (`list_custom_animation_styles`), apply it with `type: "CUSTOM"`. Build a new custom style only when no preset matches, from Figma style ids — do not hand-author the same fade as raw keyframes and a custom style.
 
+### For 3D transforms and scenes
+New in Plugin API Update 142 (still **beta** — the surface may change). Reach for it only when the user is describing real depth, tilt, or a shared 3D space; a flat mockup with a fake shadow is not a 3D task.
+- `get_transform_3d` first to see the current `transform3d`/`transformOrigin`/`scene3d` and whether the node supports it. Then `set_transform_3d` with a `FIXED_ORDER` transform — `translateZ` in px, `rotateX`/`rotateY`/`rotateZ` in degrees, applied in CSS order. Omitted fields keep the current value, so change one axis at a time instead of restating all four.
+- `transformOrigin` is the pivot the tilt rotates around (`50%`/`50%` by default). Off-centre origins are what make a card look like it rotates on a hinge rather than its middle.
+- Depth needs a scene: `set_scene_3d` on an ancestor **frame/component/instance** with `preserve3d: true` so children share one 3D space, and a sane `perspective`. Without it, a child's `translateZ` has no visible depth.
+- **`preserve3d: true` flattens effects:** `opacity`, `blendMode`, `effects` (and effect styles), and `clipsContent` stop rendering on that container. Don't put a drop shadow or a clip on a preserve-3d wrapper — move it to a child or a plain parent.
+- A 3D transform never changes layout size or `relativeTransform`, so it is safe to add to a node that is already placed; it will not reflow siblings.
+- To animate the depth, keep a `FIXED_ORDER` transform on the node and use `set_keyframe_track` with `TRANSFORM_3D_TRANSLATION_Z` / `TRANSFORM_3D_ROTATION_X`/`_Y`/`_Z` (and `SCENE_3D_PERSPECTIVE` for the container). `FREEFORM` cannot be keyframed.
+- Flag the beta status to the user when you introduce 3D into a production file.
+
 ### For styling
 Prefer:
 - checking `libraries/<fileKey>/file-library.md` first for existing tokens before calling `list_variables` or `get_styles`
@@ -242,6 +252,9 @@ Prefer:
 ### For reacting to the user's canvas
 Prefer:
 - `subscribe_events` (selectionchange/documentchange) + `get_events` when you need to watch the user's live selection or canvas changes over a session, instead of polling `get_selection`
+
+### For the user's own selection
+`set_focus` / `set_selections` move the author's selection and viewport. The plugin UI has a **"Follow AI"** toggle (on by default); when the author turns it **off** to edit the file uninterrupted, `figma_bridge_status` reports `allowSelectAndFocus: false`, every create/import/group/distribute stops auto-selecting, and `set_focus` / `set_selections` return `{ success: false, selectionDisabled: true }`. Read the flag and do not fight it — a returned node id is enough to keep working.
 
 ### For destructive changes
 Only use:

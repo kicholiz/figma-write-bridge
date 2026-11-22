@@ -6,6 +6,8 @@
 
 Use `set_multiple_annotations` (one batched call, not one `set_annotation` per node) with `labelMarkdown` for the note. Note that setting an annotation **replaces** that node's existing annotations, so call `get_annotations` first if you're adding to a screen that already has some, and re-send the merged set.
 
+Before you annotate, make sure the screen is **named for code**: generic Figma names (`Frame 427`, `Group 12`, `Rectangle 4`) become garbage class names on the other side. Rename layers, components, and variables by role first — see [naming.md](naming.md).
+
 ### What to annotate
 
 Cover these on every screen — skip a category only when it genuinely doesn't apply:

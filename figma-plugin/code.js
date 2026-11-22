@@ -15,6 +15,14 @@ const defaultChannel = "default";
 const defaultWsUrl = `ws://${defaultHost}:${defaultPort}`;
 const defaultHostPort = `${defaultHost}:${defaultPort}`;
 
+// "Follow AI" policy. When on (default) the bridge may select and focus: actions
+// select what they create, scroll the viewport, and set_focus / set_selections work.
+// When off the author is working in the same file: nothing touches
+// figma.currentPage.selection or the viewport, and set_focus / set_selections
+// return a "selectionDisabled" result. Persisted per user.
+const selectionPolicyStorageKey = "allowSelectAndFocus";
+let allowSelectAndFocus = true;
+
 const scanPortStart = 8787;
 const scanPortCount = 11;
 const scanTimeoutMs = 1200;
@@ -80,6 +88,14 @@ const uiHtml = `<!doctype html>
       }
       button.icon-btn:hover { color: var(--text); }
       .hint { font-size: 10.5px; color: var(--text-dim); line-height: 1.4; }
+      .switch-row {
+        display: flex; align-items: center; gap: 8px; cursor: pointer;
+        text-transform: none; letter-spacing: 0; font-size: 12px; color: var(--text);
+      }
+      .switch-row input[type="checkbox"] {
+        width: auto; flex: 0 0 auto; margin: 0; padding: 0;
+        accent-color: var(--accent); cursor: pointer;
+      }
       input {
         width: 100%; padding: 8px 10px; border: 1px solid var(--border);
         border-radius: 6px; background: var(--panel-2); color: var(--text);
@@ -173,6 +189,14 @@ const uiHtml = `<!doctype html>
         </div>
         <div class="hint" id="historyHint">Nothing to undo yet.</div>
       </div>
+      <div class="field">
+        <label>Selection &amp; focus</label>
+        <label class="switch-row" for="followAi">
+          <input type="checkbox" id="followAi" />
+          <span>Follow AI</span>
+        </label>
+        <div class="hint" id="selectionPolicyHint">On — the AI may select and zoom to layers it creates.</div>
+      </div>
       <div class="log-wrap">
         <div class="log-head"><span>Activity log</span><button id="clearLog">Clear</button></div>
         <pre id="log"></pre>
@@ -194,6 +218,8 @@ const uiHtml = `<!doctype html>
       const undoBtn = document.getElementById("undo");
       const redoBtn = document.getElementById("redo");
       const historyHintEl = document.getElementById("historyHint");
+      const followAiEl = document.getElementById("followAi");
+      const selectionPolicyHintEl = document.getElementById("selectionPolicyHint");
 
       wsUrlInput.value = "${defaultHostPort}";
       channelInput.value = "${defaultChannel}";
@@ -206,6 +232,7 @@ const uiHtml = `<!doctype html>
       let currentUrl = "${defaultWsUrl}";
       let fileKeyInfo = null;
       let fileNameInfo = null;
+      let allowSelectAndFocusInfo = true;
       let reconnectDelayMs = 800;
       let reconnectTimer = null;
       let connectionEpoch = 0;
@@ -437,6 +464,16 @@ const uiHtml = `<!doctype html>
         return /^wss?:\\/\\//i.test(named) ? named : "ws://" + named;
       }
 
+      // The main thread owns the policy and posts it here; keep the checkbox and
+      // hint in sync (also used once on load before the first message arrives).
+      function applySelectionPolicy(allow) {
+        allowSelectAndFocusInfo = allow !== false;
+        followAiEl.checked = allowSelectAndFocusInfo;
+        selectionPolicyHintEl.textContent = allowSelectAndFocusInfo
+          ? "On — the AI may select and zoom to layers it creates."
+          : "Off — the AI won't change your selection or viewport while you work.";
+      }
+
       function sendJoin(socket) {
         const target = socket || ws;
         if (!target || target.readyState !== WebSocket.OPEN) return;
@@ -446,7 +483,8 @@ const uiHtml = `<!doctype html>
               type: "join",
               channel: currentChannel,
               fileKey: fileKeyInfo,
-              fileName: fileNameInfo
+              fileName: fileNameInfo,
+              allowSelectAndFocus: allowSelectAndFocusInfo
             })
           );
         } catch (err) {}
@@ -587,6 +625,20 @@ const uiHtml = `<!doctype html>
           }
           return;
         }
+        if (msg.type === "selectionPolicy") {
+          applySelectionPolicy(msg.allowSelectAndFocus);
+          // Tell the server so the agent can read the policy (figma_bridge_status).
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(
+              JSON.stringify({
+                type: "selection_policy",
+                channel: currentChannel,
+                allowSelectAndFocus: allowSelectAndFocusInfo
+              })
+            );
+          }
+          return;
+        }
         if (msg.type === "servers") {
           populateServers(msg.servers);
           return;
@@ -638,14 +690,35 @@ const uiHtml = `<!doctype html>
         log("> redo (from plugin UI)");
         parent.postMessage({ pluginMessage: { type: "localRedo" } }, "*");
       };
+      // "Follow AI" ON (default) lets the bridge select & focus; OFF keeps the
+      // author's selection and viewport untouched while they work. The main
+      // thread owns the flag and persists it.
+      followAiEl.onchange = () => {
+        const allow = followAiEl.checked;
+        log("> follow AI: " + (allow ? "on" : "off (you're editing)"));
+        parent.postMessage({ pluginMessage: { type: "setSelectionPolicy", allow } }, "*");
+      };
       // Ask for the current depths on load so the buttons start in the right state.
       parent.postMessage({ pluginMessage: { type: "undoState" } }, "*");
+      applySelectionPolicy(allowSelectAndFocusInfo);
       requestScan();
     </script>
   </body>
 </html>`;
 
-figma.showUI(uiHtml, { width: 380, height: 545 });
+figma.showUI(uiHtml, { width: 380, height: 615 });
+
+function postSelectionPolicy() {
+  try { figma.ui.postMessage({ type: "selectionPolicy", allowSelectAndFocus }); } catch (_err) {}
+}
+
+(async () => {
+  try {
+    const stored = await figma.clientStorage.getAsync(selectionPolicyStorageKey);
+    if (typeof stored === "boolean") allowSelectAndFocus = stored;
+  } catch (_err) {}
+  postSelectionPolicy();
+})();
 
 try {
   figma.ui.postMessage({
@@ -1867,13 +1940,22 @@ async function focusNodes(nodes) {
     return p && p.id === figma.currentPage.id;
   });
   if (!samePage.length) throw new Error("Nodes are not on a page and cannot be selected");
-  figma.currentPage.selection = samePage;
-  figma.viewport.scrollAndZoomIntoView(samePage);
+  if (allowSelectAndFocus) figma.currentPage.selection = samePage;
+  if (allowSelectAndFocus) figma.viewport.scrollAndZoomIntoView(samePage);
   return { pageId: figma.currentPage.id, pageName: figma.currentPage.name, focused: samePage.length, skipped: list.length - samePage.length };
+}
+
+function selectionDisabledResult() {
+  return {
+    success: false,
+    selectionDisabled: true,
+    reason: "Follow AI is off in the plugin UI, so the bridge will not change the author's selection or viewport. Turn Follow AI back on to allow select & focus."
+  };
 }
 
 async function setFocus(params) {
   if (!params || !params.nodeId) throw new Error("Missing nodeId parameter");
+  if (!allowSelectAndFocus) return selectionDisabledResult();
   const node = await figma.getNodeByIdAsync(String(params.nodeId));
   if (!node) throw new Error("Node not found with ID: " + String(params.nodeId));
   const info = await focusNodes([node]);
@@ -1883,6 +1965,7 @@ async function setFocus(params) {
 async function setSelections(params) {
   const ids = ensureArray(params && params.nodeIds);
   if (!ids.length) throw new Error("Missing or invalid nodeIds parameter");
+  if (!allowSelectAndFocus) return selectionDisabledResult();
   const nodes = await Promise.all(ids.map((id) => figma.getNodeByIdAsync(String(id))));
   const validNodes = nodes.filter((n) => n !== null);
   if (!validNodes.length) throw new Error("No valid nodes found");
@@ -1943,8 +2026,8 @@ async function createFrameNode(p) {
     clearDefaultWhiteFill(frame);
   }
 
-  figma.currentPage.selection = [frame];
-  figma.viewport.scrollAndZoomIntoView([frame]);
+  if (allowSelectAndFocus) figma.currentPage.selection = [frame];
+  if (allowSelectAndFocus) figma.viewport.scrollAndZoomIntoView([frame]);
   if (pluginTargetFrameIds.size === 0) {
     pluginTargetFrameIds = new Set([frame.id]);
     try {
@@ -1970,8 +2053,8 @@ async function createRectangleNode(p) {
   rect.name = p.name ? String(p.name) : "Rectangle";
   const host = await resolveCreateHost(p);
   const placed = placeCreatedNode(rect, host, p);
-  figma.currentPage.selection = [rect];
-  figma.viewport.scrollAndZoomIntoView([rect]);
+  if (allowSelectAndFocus) figma.currentPage.selection = [rect];
+  if (allowSelectAndFocus) figma.viewport.scrollAndZoomIntoView([rect]);
   return { nodeId: rect.id, name: rect.name, type: rect.type, ...placed };
 }
 
@@ -2099,8 +2182,8 @@ async function createTextNode(p) {
     sizing.layoutSizingVertical = "HUG";
   }
   const placed = placeCreatedNode(text, host, sizing);
-  figma.currentPage.selection = [text];
-  figma.viewport.scrollAndZoomIntoView([text]);
+  if (allowSelectAndFocus) figma.currentPage.selection = [text];
+  if (allowSelectAndFocus) figma.viewport.scrollAndZoomIntoView([text]);
   return {
     nodeId: text.id,
     name: text.name,
@@ -2668,6 +2751,17 @@ async function captureNodeSnapshotProps(node) {
     if ("strokes" in node && Array.isArray(node.strokes)) props.strokes = JSON.parse(JSON.stringify(node.strokes));
     if ("strokeWeight" in node && typeof node.strokeWeight === "number") props.strokeWeight = node.strokeWeight;
     if (node.type === "TEXT" && "characters" in node) props.characters = node.characters;
+    if ("transform3d" in node) {
+      const v = node.transform3d;
+      props.transform3d = v ? JSON.parse(JSON.stringify(v)) : null;
+    }
+    if ("transformOrigin" in node && node.transformOrigin) {
+      props.transformOrigin = { x: { ...node.transformOrigin.x }, y: { ...node.transformOrigin.y } };
+    }
+    if ("scene3d" in node) {
+      const v = node.scene3d;
+      props.scene3d = v ? JSON.parse(JSON.stringify(v)) : null;
+    }
   } catch (_err) {
   }
   return props;
@@ -2690,6 +2784,9 @@ async function applyNodeSnapshotProps(node, props) {
     if (node.fontName && node.fontName !== figma.mixed) await figma.loadFontAsync(node.fontName);
     node.characters = props.characters;
   }
+  if ("transform3d" in props && "transform3d" in node) node.transform3d = props.transform3d || { type: "NONE" };
+  if (props.transformOrigin !== undefined && "transformOrigin" in node) node.transformOrigin = props.transformOrigin;
+  if ("scene3d" in props && "scene3d" in node) node.scene3d = props.scene3d;
 }
 
 async function createCheckpoint(params) {
@@ -2756,7 +2853,7 @@ const redoStack = [];
 const UNDO_MAX = 50;
 
 const UNDOABLE_ACTIONS = new Set([
-  "rename_node", "set_fill_color", "set_stroke_color", "set_gradient_fill", "set_image_fill",
+  "renameNode", "set_fill_color", "set_stroke_color", "set_gradient_fill", "set_image_fill",
   "set_effects", "set_text_style", "move_node", "resize_node", "resize_to_fit", "set_corner_radius",
   "set_text_content", "set_multiple_text_contents", "set_layout_mode", "set_padding",
   "set_axis_align", "set_layout_sizing", "set_item_spacing", "set_auto_layout",
@@ -2769,7 +2866,8 @@ const UNDOABLE_ACTIONS = new Set([
   "set_vector_paths", "set_variant_properties", "set_instance_properties",
   "set_overlay_settings", "append_to_slot",
   "distribute_nodes", "arrange_children",
-  "apply_shader"
+  "apply_shader",
+  "set_transform_3d", "set_transform_origin", "set_scene_3d"
 ]);
 
 async function collectNodeSnapshots(ids) {
@@ -2871,8 +2969,8 @@ async function cloneNode(params) {
   let clonedPage = cloned;
   while (clonedPage && clonedPage.type !== "PAGE") clonedPage = clonedPage.parent;
   if (clonedPage && figma.currentPage && clonedPage.id === figma.currentPage.id) {
-    figma.currentPage.selection = [cloned];
-    figma.viewport.scrollAndZoomIntoView([cloned]);
+    if (allowSelectAndFocus) figma.currentPage.selection = [cloned];
+    if (allowSelectAndFocus) figma.viewport.scrollAndZoomIntoView([cloned]);
   }
   return { success: true, nodeId: cloned.id };
 }
@@ -2896,8 +2994,8 @@ async function cloneNodeIntoParent(params) {
     let containingPage = parent;
     while (containingPage && containingPage.type !== "PAGE") containingPage = containingPage.parent;
     if (containingPage && figma.currentPage && containingPage.id === figma.currentPage.id) {
-      figma.currentPage.selection = [cloned];
-      figma.viewport.scrollAndZoomIntoView([cloned]);
+      if (allowSelectAndFocus) figma.currentPage.selection = [cloned];
+      if (allowSelectAndFocus) figma.viewport.scrollAndZoomIntoView([cloned]);
     }
     return { success: true, nodeId: cloned.id, parentNodeId: parent.id };
   } catch (err) {
@@ -2938,8 +3036,8 @@ async function moveNodeToPage(params) {
     let containingPage = target;
     while (containingPage && containingPage.type !== "PAGE") containingPage = containingPage.parent;
     if (containingPage && figma.currentPage && containingPage.id === figma.currentPage.id) {
-      figma.currentPage.selection = [target];
-      figma.viewport.scrollAndZoomIntoView([target]);
+      if (allowSelectAndFocus) figma.currentPage.selection = [target];
+      if (allowSelectAndFocus) figma.viewport.scrollAndZoomIntoView([target]);
     }
     return {
       success: true,
@@ -3792,6 +3890,188 @@ async function reorderGridTracks(params) {
 }
 
 // ---------------------------------------------------------------------------
+// 3D transforms / scenes (Plugin API Update 142 — beta)
+// ---------------------------------------------------------------------------
+
+const TRANSFORM_ORIGIN_UNITS = new Set(["PERCENT", "PIXELS"]);
+
+function readTransform3dValue(node) {
+  const value = readMaybe(node, "transform3d");
+  if (!value || typeof value !== "object" || !value.type) return null;
+  const out = { type: value.type };
+  if (typeof value.translateZ === "number") out.translateZ = roundNum(value.translateZ, 4);
+  if (typeof value.rotateX === "number") out.rotateX = roundNum(value.rotateX, 4);
+  if (typeof value.rotateY === "number") out.rotateY = roundNum(value.rotateY, 4);
+  if (typeof value.rotateZ === "number") out.rotateZ = roundNum(value.rotateZ, 4);
+  if ("backfaceVisible" in value) out.backfaceVisible = value.backfaceVisible;
+  if ("visible" in value) out.visible = value.visible;
+  return out;
+}
+
+function readTransformOriginValue(node) {
+  const value = readMaybe(node, "transformOrigin");
+  if (!value || typeof value !== "object" || !value.x || !value.y) return null;
+  return {
+    x: { unit: value.x.unit, value: roundNum(value.x.value, 4) },
+    y: { unit: value.y.unit, value: roundNum(value.y.value, 4) }
+  };
+}
+
+function readScene3dValue(node) {
+  const value = readMaybe(node, "scene3d");
+  if (!value || typeof value !== "object") return null;
+  const out = { perspective: roundNum(value.perspective, 4), preserve3d: Boolean(value.preserve3d) };
+  if ("visible" in value) out.visible = value.visible;
+  return out;
+}
+
+function transform3dNumber(value, fallback, field) {
+  if (value === undefined || value === null) {
+    return typeof fallback === "number" ? fallback : 0;
+  }
+  const n = Number(value);
+  if (!isFinite(n)) throw new Error("transform3d." + field + " must be a finite number");
+  return n;
+}
+
+async function getTransform3d(params) {
+  const p = params && typeof params === "object" ? params : {};
+  if (!p.nodeId) throw new Error("Missing nodeId");
+  const node = await getNodeByIdAsync(normalizeFigmaNodeId(String(p.nodeId)));
+  if (!node) throw new Error("Node not found with ID: " + String(p.nodeId));
+  return {
+    success: true,
+    nodeId: node.id,
+    supportsTransform3d: "transform3d" in node,
+    transform3d: readTransform3dValue(node),
+    transformOrigin: readTransformOriginValue(node),
+    scene3d: readScene3dValue(node)
+  };
+}
+
+async function setTransform3d(params) {
+  const p = params && typeof params === "object" ? params : {};
+  if (!p.nodeId) throw new Error("Missing nodeId");
+  const node = await getNodeByIdAsync(normalizeFigmaNodeId(String(p.nodeId)));
+  if (!node) throw new Error("Node not found with ID: " + String(p.nodeId));
+  if (!("transform3d" in node)) {
+    throw new Error("Node type " + node.type + " does not support transform3d (3D transforms require Plugin API Update 142+).");
+  }
+
+  const source = p.transform3d && typeof p.transform3d === "object" ? p.transform3d : p;
+  const type = String(source.type || "FIXED_ORDER").toUpperCase();
+
+  if (type === "NONE") {
+    node.transform3d = { type: "NONE" };
+    return { success: true, nodeId: node.id, transform3d: readTransform3dValue(node) };
+  }
+  if (type !== "FIXED_ORDER") {
+    throw new Error(
+      "Unsupported transform3d type: " + type +
+      " (expected NONE or FIXED_ORDER; FREEFORM is import-only and cannot be assigned)."
+    );
+  }
+
+  // Preserve untouched fields from the node's current value so a caller can
+  // change one axis (e.g. only rotateY) without restating the rest.
+  const existing = readMaybe(node, "transform3d");
+  const base = existing && existing.type === "FIXED_ORDER" ? existing : null;
+  const next = {
+    type: "FIXED_ORDER",
+    translateZ: transform3dNumber(source.translateZ, base && base.translateZ, "translateZ"),
+    rotateX: transform3dNumber(source.rotateX, base && base.rotateX, "rotateX"),
+    rotateY: transform3dNumber(source.rotateY, base && base.rotateY, "rotateY"),
+    rotateZ: transform3dNumber(source.rotateZ, base && base.rotateZ, "rotateZ")
+  };
+  const backfaceVisible = source.backfaceVisible !== undefined && source.backfaceVisible !== null
+    ? source.backfaceVisible
+    : (base ? base.backfaceVisible : undefined);
+  if (backfaceVisible !== undefined && backfaceVisible !== null) next.backfaceVisible = Boolean(backfaceVisible);
+  const visible = source.visible !== undefined && source.visible !== null
+    ? source.visible
+    : (base ? base.visible : undefined);
+  if (visible !== undefined && visible !== null) next.visible = Boolean(visible);
+
+  node.transform3d = next;
+  return { success: true, nodeId: node.id, transform3d: readTransform3dValue(node) };
+}
+
+function normalizeTransformOriginAxis(axis, fallback) {
+  const src = axis && typeof axis === "object" ? axis : null;
+  if (!src) return fallback ? { unit: fallback.unit, value: fallback.value } : { unit: "PERCENT", value: 50 };
+  const unit = String(src.unit || (fallback && fallback.unit) || "PERCENT").toUpperCase();
+  if (!TRANSFORM_ORIGIN_UNITS.has(unit)) throw new Error("transformOrigin unit must be PERCENT or PIXELS");
+  const raw = src.value !== undefined && src.value !== null ? src.value : (fallback ? fallback.value : 0);
+  const value = Number(raw);
+  if (!isFinite(value)) throw new Error("transformOrigin value must be a finite number");
+  return { unit, value };
+}
+
+async function setTransformOrigin(params) {
+  const p = params && typeof params === "object" ? params : {};
+  if (!p.nodeId) throw new Error("Missing nodeId");
+  const node = await getNodeByIdAsync(normalizeFigmaNodeId(String(p.nodeId)));
+  if (!node) throw new Error("Node not found with ID: " + String(p.nodeId));
+  if (!("transformOrigin" in node)) {
+    throw new Error("Node type " + node.type + " does not support transformOrigin (requires Plugin API Update 142+).");
+  }
+  const origin = p.transformOrigin && typeof p.transformOrigin === "object" ? p.transformOrigin : p;
+  const current = readMaybe(node, "transformOrigin");
+  node.transformOrigin = {
+    x: normalizeTransformOriginAxis(origin.x, current && current.x),
+    y: normalizeTransformOriginAxis(origin.y, current && current.y)
+  };
+  return { success: true, nodeId: node.id, transformOrigin: readTransformOriginValue(node) };
+}
+
+async function getScene3d(params) {
+  const p = params && typeof params === "object" ? params : {};
+  if (!p.nodeId) throw new Error("Missing nodeId");
+  const node = await getNodeByIdAsync(normalizeFigmaNodeId(String(p.nodeId)));
+  if (!node) throw new Error("Node not found with ID: " + String(p.nodeId));
+  return {
+    success: true,
+    nodeId: node.id,
+    supportsScene3d: "scene3d" in node,
+    scene3d: readScene3dValue(node)
+  };
+}
+
+async function setScene3d(params) {
+  const p = params && typeof params === "object" ? params : {};
+  if (!p.nodeId) throw new Error("Missing nodeId");
+  const node = await getNodeByIdAsync(normalizeFigmaNodeId(String(p.nodeId)));
+  if (!node) throw new Error("Node not found with ID: " + String(p.nodeId));
+  if (!("scene3d" in node)) {
+    throw new Error("Node type " + node.type + " does not support scene3d (frames, components, and instances only; requires Plugin API Update 142+).");
+  }
+
+  const raw = p.scene3d !== undefined ? p.scene3d : p;
+  if (raw === null) {
+    node.scene3d = null;
+    return { success: true, nodeId: node.id, scene3d: null, cleared: true };
+  }
+  if (!raw || typeof raw !== "object") throw new Error("scene3d must be an object ({ perspective, preserve3d, visible? }) or null to clear");
+
+  const current = readMaybe(node, "scene3d");
+  const perspective = raw.perspective !== undefined && raw.perspective !== null
+    ? Number(raw.perspective)
+    : (current && typeof current.perspective === "number" ? current.perspective : -1);
+  if (!isFinite(perspective)) throw new Error("scene3d.perspective must be a finite number");
+  const preserve3d = raw.preserve3d !== undefined && raw.preserve3d !== null
+    ? Boolean(raw.preserve3d)
+    : Boolean(current && current.preserve3d);
+  const next = { perspective, preserve3d };
+  const visible = raw.visible !== undefined && raw.visible !== null
+    ? raw.visible
+    : (current ? current.visible : undefined);
+  if (visible !== undefined && visible !== null) next.visible = Boolean(visible);
+
+  node.scene3d = next;
+  return { success: true, nodeId: node.id, scene3d: readScene3dValue(node) };
+}
+
+// ---------------------------------------------------------------------------
 // Components
 // ---------------------------------------------------------------------------
 
@@ -3845,8 +4125,8 @@ async function createComponentNode(params) {
   }
   component.name = p.name ? String(p.name) : "Component";
   const placed = placeCreatedNode(component, host, p);
-  figma.currentPage.selection = [component];
-  figma.viewport.scrollAndZoomIntoView([component]);
+  if (allowSelectAndFocus) figma.currentPage.selection = [component];
+  if (allowSelectAndFocus) figma.viewport.scrollAndZoomIntoView([component]);
   return { success: true, nodeId: component.id, name: component.name, type: component.type, ...placed };
 }
 
@@ -3858,8 +4138,8 @@ async function createComponentFromNodeAction(params) {
   }
   const component = figma.createComponentFromNode(source);
   if (params.name !== undefined && params.name !== null) component.name = String(params.name);
-  figma.currentPage.selection = [component];
-  figma.viewport.scrollAndZoomIntoView([component]);
+  if (allowSelectAndFocus) figma.currentPage.selection = [component];
+  if (allowSelectAndFocus) figma.viewport.scrollAndZoomIntoView([component]);
   return { success: true, nodeId: component.id, name: component.name, type: component.type };
 }
 
@@ -3901,8 +4181,8 @@ async function combineAsVariantsAction(params) {
   const componentSet = index === undefined ? figma.combineAsVariants(nodes, parent) : figma.combineAsVariants(nodes, parent, index);
   if (p.name !== undefined && p.name !== null) componentSet.name = String(p.name);
   layoutComponentSetVariants(componentSet, p);
-  figma.currentPage.selection = [componentSet];
-  figma.viewport.scrollAndZoomIntoView([componentSet]);
+  if (allowSelectAndFocus) figma.currentPage.selection = [componentSet];
+  if (allowSelectAndFocus) figma.viewport.scrollAndZoomIntoView([componentSet]);
   return {
     success: true,
     componentSetId: componentSet.id,
@@ -4194,8 +4474,8 @@ async function createComponentInstance(params) {
   const instance = component.createInstance();
   const host = await resolveCreateHost(params);
   const placed = placeCreatedNode(instance, host, params);
-  figma.currentPage.selection = [instance];
-  figma.viewport.scrollAndZoomIntoView([instance]);
+  if (allowSelectAndFocus) figma.currentPage.selection = [instance];
+  if (allowSelectAndFocus) figma.viewport.scrollAndZoomIntoView([instance]);
   return { success: true, nodeId: instance.id, ...placed };
 }
 
@@ -4215,8 +4495,8 @@ async function createInstanceFromInstance(params) {
   const instance = main.createInstance();
   const host = await resolveCreateHost(params);
   const placed = placeCreatedNode(instance, host, params);
-  figma.currentPage.selection = [instance];
-  figma.viewport.scrollAndZoomIntoView([instance]);
+  if (allowSelectAndFocus) figma.currentPage.selection = [instance];
+  if (allowSelectAndFocus) figma.viewport.scrollAndZoomIntoView([instance]);
   return { success: true, nodeId: instance.id, ...placed };
 }
 
@@ -4296,8 +4576,8 @@ async function createInstanceFromComponentKey(params) {
   const instance = component.createInstance();
   const host = await resolveCreateHost(params);
   const placed = placeCreatedNode(instance, host, params);
-  figma.currentPage.selection = [instance];
-  figma.viewport.scrollAndZoomIntoView([instance]);
+  if (allowSelectAndFocus) figma.currentPage.selection = [instance];
+  if (allowSelectAndFocus) figma.viewport.scrollAndZoomIntoView([instance]);
   return { success: true, nodeId: instance.id, ...placed };
 }
 
@@ -4308,8 +4588,8 @@ async function createInstanceFromComponentSetKey(params) {
   const instance = set.defaultVariant.createInstance();
   const host = await resolveCreateHost(params);
   const placed = placeCreatedNode(instance, host, params);
-  figma.currentPage.selection = [instance];
-  figma.viewport.scrollAndZoomIntoView([instance]);
+  if (allowSelectAndFocus) figma.currentPage.selection = [instance];
+  if (allowSelectAndFocus) figma.viewport.scrollAndZoomIntoView([instance]);
   return { success: true, nodeId: instance.id, ...placed };
 }
 
@@ -6310,7 +6590,10 @@ const TREE_FIELD_READERS = {
     return Object.keys(p).length ? p : undefined;
   },
   visible: (node) => ("visible" in node && node.visible === false ? false : undefined),
-  opacity: (node) => ("opacity" in node && typeof node.opacity === "number" && node.opacity !== 1 ? roundNum(node.opacity, 3) : undefined)
+  opacity: (node) => ("opacity" in node && typeof node.opacity === "number" && node.opacity !== 1 ? roundNum(node.opacity, 3) : undefined),
+  transform3d: (node) => readTransform3dValue(node) || undefined,
+  transformOrigin: (node) => readTransformOriginValue(node) || undefined,
+  scene3d: (node) => readScene3dValue(node) || undefined
 };
 
 function serializeLiveNode(node, options, depth) {
@@ -6803,8 +7086,8 @@ async function createVector(params) {
   if (params && params.strokeWeight !== undefined) vector.strokeWeight = Number(params.strokeWeight);
   const host = await resolveCreateHost(params);
   const placed = placeCreatedNode(vector, host, params);
-  figma.currentPage.selection = [vector];
-  figma.viewport.scrollAndZoomIntoView([vector]);
+  if (allowSelectAndFocus) figma.currentPage.selection = [vector];
+  if (allowSelectAndFocus) figma.viewport.scrollAndZoomIntoView([vector]);
   return { nodeId: vector.id, name: vector.name, type: vector.type, ...placed };
 }
 
@@ -6836,8 +7119,8 @@ async function booleanGroup(params) {
   if (!parent || !("appendChild" in parent)) throw new Error("Parent cannot contain children");
   const result = figma[fn](nodes, parent);
   if (params && params.name !== undefined && params.name !== null) result.name = String(params.name);
-  figma.currentPage.selection = [result];
-  figma.viewport.scrollAndZoomIntoView([result]);
+  if (allowSelectAndFocus) figma.currentPage.selection = [result];
+  if (allowSelectAndFocus) figma.viewport.scrollAndZoomIntoView([result]);
   return { success: true, nodeId: result.id, name: result.name, type: result.type };
 }
 
@@ -6850,7 +7133,7 @@ async function groupNodes(params) {
   if (!parent || !("appendChild" in parent)) throw new Error("Parent cannot contain children");
   const group = figma.group(nodes, parent);
   if (params && params.name !== undefined && params.name !== null) group.name = String(params.name);
-  figma.currentPage.selection = [group];
+  if (allowSelectAndFocus) figma.currentPage.selection = [group];
   return { success: true, nodeId: group.id, name: group.name, childCount: group.children.length };
 }
 
@@ -6885,8 +7168,8 @@ async function createSection(params) {
   }
   const host = await resolveCreateHost(p);
   const placed = placeCreatedNode(section, host, p);
-  figma.currentPage.selection = [section];
-  figma.viewport.scrollAndZoomIntoView([section]);
+  if (allowSelectAndFocus) figma.currentPage.selection = [section];
+  if (allowSelectAndFocus) figma.viewport.scrollAndZoomIntoView([section]);
   return { nodeId: section.id, name: section.name, type: section.type, ...placed };
 }
 
@@ -7087,7 +7370,7 @@ async function generateGrid(params) {
     }
   }
   const last = created.length ? await figma.getNodeByIdAsync(created[created.length - 1]) : null;
-  if (last) { figma.currentPage.selection = [last]; figma.viewport.scrollAndZoomIntoView([last]); }
+  if (last) { if (allowSelectAndFocus) figma.currentPage.selection = [last]; if (allowSelectAndFocus) figma.viewport.scrollAndZoomIntoView([last]); }
   return { success: true, columns, rows, createdNodeIds: created };
 }
 
@@ -7540,6 +7823,18 @@ function countsToSortedArray(map) {
     .sort((a, b) => b.count - a.count || String(a.value).localeCompare(String(b.value), undefined, { numeric: true }));
 }
 
+async function getNodeCss(params) {
+  if (!params || !params.nodeId) throw new Error("Missing nodeId");
+  const nodeId = normalizeFigmaNodeId(String(params.nodeId));
+  const node = await figma.getNodeByIdAsync(nodeId);
+  if (!node) throw new Error("Node not found with ID: " + nodeId);
+  if (typeof node.getCSSAsync !== "function") {
+    throw new Error("getCSSAsync is not available on this node (requires Plugin API Update 136+)");
+  }
+  const css = await node.getCSSAsync();
+  return { success: true, nodeId: node.id, name: node.name, css: css && typeof css === "object" ? css : {} };
+}
+
 async function getStyleGuide(params) {
   await figma.currentPage.loadAsync();
   const rootNodeId = params && params.rootNodeId ? String(params.rootNodeId) : null;
@@ -7732,7 +8027,7 @@ async function distributeNodes(params) {
     else { n.y = positions.get(n.id); n.x = cross; }
     results.push({ nodeId: n.id, x: n.x, y: n.y });
   }
-  figma.currentPage.selection = nodes;
+  if (allowSelectAndFocus) figma.currentPage.selection = nodes;
   return { success: true, axis, mode, crossAlign, distributedNodeIds: nodes.map((n) => n.id), results };
 }
 
@@ -8136,7 +8431,7 @@ async function generatePalette(params) {
       if (rect) rect.x = x;
       if (label) label.x = x;
     }
-    try { figma.viewport.scrollAndZoomIntoView([host]); } catch (_e) {}
+    try { if (allowSelectAndFocus) figma.viewport.scrollAndZoomIntoView([host]); } catch (_e) {}
   }
 
   return {
@@ -8177,8 +8472,8 @@ async function extractComponentSet(params) {
   if (p.propertyName !== undefined && p.propertyName !== null && String(p.propertyName).trim()) {
     try { set.addComponentProperty(String(p.propertyName), "VARIANT", String(components[0].name)); } catch (_err) {}
   }
-  figma.currentPage.selection = [set];
-  figma.viewport.scrollAndZoomIntoView([set]);
+  if (allowSelectAndFocus) figma.currentPage.selection = [set];
+  if (allowSelectAndFocus) figma.viewport.scrollAndZoomIntoView([set]);
   return {
     success: true,
     componentSetId: set.id,
@@ -8190,7 +8485,7 @@ async function extractComponentSet(params) {
 }
 
 const TARGET_SCOPED_ACTIONS = {
-  rename_node: (p) => [p.nodeId],
+  renameNode: (p) => [p.nodeId],
   set_fill_color: (p) => [p.nodeId],
   set_stroke_color: (p) => [p.nodeId],
   set_gradient_fill: (p) => [p.nodeId],
@@ -8269,24 +8564,31 @@ const TARGET_SCOPED_ACTIONS = {
   apply_animation_style: (p) => [p.nodeId],
   remove_animation_style: (p) => [p.nodeId],
   set_timeline_duration: (p) => [p.nodeId],
-  apply_shader: (p) => [p.nodeId]
+  apply_shader: (p) => [p.nodeId],
+  get_transform_3d: (p) => [p.nodeId],
+  set_transform_3d: (p) => [p.nodeId],
+  get_transform_origin: (p) => [p.nodeId],
+  set_transform_origin: (p) => [p.nodeId],
+  get_scene_3d: (p) => [p.nodeId],
+  set_scene_3d: (p) => [p.nodeId],
+  get_node_css: (p) => [p.nodeId]
 };
 
 const READ_ONLY_ACTIONS = new Set([
   "ping", "get_document_info", "get_selection", "read_my_design",
   "get_node_info", "get_nodes_info", "get_all_pages", "get_document_tree",
-  "get_selection_context", "get_changes_since", "get_instance_source",
+  "get_selection_context", "get_instance_source",
   "scan_instances_with_sources", "get_instance_properties", "get_instance_slots",
   "get_component_property_definitions", "get_style_guide", "get_font_list",
   "scan_text_nodes", "scan_nodes_by_types", "find_nodes", "get_styles", "get_local_components",
   "get_annotations", "get_reactions", "get_overlay_settings", "get_prototype_settings",
   "list_variable_collections", "list_variables", "get_variable", "list_checkpoints",
-  "get_parent_chain", "export_node_as_image", "search_components",
+  "get_parent_chain", "export_node_as_image",
   "set_focus", "set_selections",
-  "create_checkpoint", "subscribe_events", "unsubscribe_events", "get_events", "list_channels",
-  "get_figma_data", "figma_get_selection", "figma_get_document_info",
+  "create_checkpoint", "subscribe_events", "unsubscribe_events",
   "getDocumentInfo", "getSelection",
-  "list_shaders", "list_animation_styles", "get_font_variation_axes"
+  "list_shaders", "list_animation_styles", "get_font_variation_axes",
+  "get_transform_3d", "get_transform_origin", "get_scene_3d", "get_node_css"
 ]);
 
 const TARGET_EXEMPT_ACTIONS = new Set([
@@ -8305,7 +8607,7 @@ const TARGET_EXEMPT_ACTIONS = new Set([
   "find_and_replace_text", "sync_target_frames",
   "import_tokens", "export_tokens",
   "import_shader_by_id",
-  "renameNode", "setText", "createFrame", "createRectangle", "createText", "setSolidFill"
+  "setText", "createFrame", "createRectangle", "createText", "setSolidFill"
 ]);
 
 const ALLOWED_ACTIONS = new Set([
@@ -8341,6 +8643,8 @@ const ALLOWED_ACTIONS = new Set([
   "normalize_spring", "convert_color",
   "list_shaders",
   "import_shader_by_id", "apply_shader", "get_font_variation_axes",
+  "get_transform_3d", "set_transform_3d", "get_transform_origin", "set_transform_origin",
+  "get_scene_3d", "set_scene_3d", "get_node_css",
   "move_node", "reparent_node", "get_parent_chain", "insert_child", "resize_node", "resize_to_fit",
   "delete_node", "delete_multiple_nodes",
   "clone_node", "clone_node_into_parent", "move_node_to_page",
@@ -8545,6 +8849,13 @@ async function dispatchAction(action, payload) {
     case "import_shader_by_id": return await importShaderByIdAction(p);
     case "apply_shader": return await applyShader(p);
     case "get_font_variation_axes": return await getFontVariationAxes(p);
+    case "get_transform_3d": return await getTransform3d(p);
+    case "set_transform_3d": return await setTransform3d(p);
+    case "get_transform_origin": return await getTransform3d(p);
+    case "set_transform_origin": return await setTransformOrigin(p);
+    case "get_scene_3d": return await getScene3d(p);
+    case "set_scene_3d": return await setScene3d(p);
+    case "get_node_css": return await getNodeCss(p);
 
     case "create_paint_style": return await createPaintStyle(p);
     case "create_text_style": return await createTextStyleAction(p);
@@ -8697,6 +9008,14 @@ figma.ui.onmessage = async (msg) => {
       figma.notify(error, { error: true });
     }
     postUndoState();
+    return;
+  }
+  if (msg.type === "setSelectionPolicy") {
+    allowSelectAndFocus = msg.allow !== false;
+    try {
+      await figma.clientStorage.setAsync(selectionPolicyStorageKey, allowSelectAndFocus);
+    } catch (_err) {}
+    postSelectionPolicy();
     return;
   }
   if (msg.type !== "exec" || typeof msg.id !== "string") return;

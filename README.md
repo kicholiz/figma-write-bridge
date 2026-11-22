@@ -6,7 +6,7 @@ This repo contains:
 - `figma-plugin/` — the Figma plugin (connects your Figma file to the bridge)
 - `mcp-server.js` — the local bridge server (runs on your computer)
 - `package.json` — Node.js setup (starts the server)
-- `skills/figma-write-bridge/` — agent skill; **zip this folder and upload the zip** to your AI agent (see below)
+- `skills/` — agent skill; **zip this folder and upload the zip** to your AI agent (see below)
 
 ---
 
@@ -25,18 +25,20 @@ This repo contains:
 - **Strokes** — `set_stroke_color` sets color/weight plus `strokeAlign`, `dashPattern`, `strokeCap`, `strokeJoin`, or applies a paint `styleId`; prefer `apply_stroke_style` / `bind_color_variable_to_stroke` when the file has tokens.
 - **Text styling** — apply existing text styles or set font/font-size/line-height/letter-spacing/case/alignment directly, with variable binding, paragraph-level `textWrapStyle` (`BALANCE`/`PRETTY`), `textTruncation` + `maxLines`, and variable-font `variationSettings` (after `get_font_variation_axes`). Generate a whole type scale from a base size + ratio with `create_typography_scale`.
 - **Design tokens** — export local variables as a W3C-style Design Tokens JSON (`export_tokens`) and import a tokens JSON into variables + paint styles (`import_tokens`).
-- **Style guides & palettes** — extract a usage style guide (`get_style_guide`: colors, fonts, sizes, spacing), list fonts used (`get_font_list`), and generate tonal color palettes with swatches/styles/variables (`generate_palette`).
+- **Style guides & palettes** — extract a usage style guide (`get_style_guide`: colors, fonts, sizes, spacing), read a single layer's CSS (`get_node_css`, `node.getCSSAsync`), list fonts used (`get_font_list`), and generate tonal color palettes with swatches/styles/variables (`generate_palette`).
 - **Components** — create/import components and instances (imports accept a `name` to rename the main node), batch-convert frames into a variant component set (`extract_component_set`), and move/copy a local component to another open file's channel with `move_component_to_file`. `get_local_components` is paged (`limit`/`offset` + `total`).
 - **Undo/redo** — snapshot-based `undo` / `redo` for the most recent mutating actions, shared between the agent's tools and Undo/Redo buttons in the plugin UI itself (best-effort; cannot restore deleted nodes or structural changes).
 - **Pages** — create, rename, duplicate (auto-names like `Name 2` or takes a `name`), reorder, switch, and delete pages; `create_page` / `duplicate_page` accept `activate: true` to switch to the new page.
 - **Bulk & template work** — `bulk_rename`, `bulk_update`, `replace_all_instances`, and page duplication.
 - **Variables & themes** — variable types cover `COLOR`, `FLOAT`, `STRING`, `BOOLEAN`, and the motion types `EASING` and `TIMING`, so animation curves and durations can be tokenized alongside color and spacing. Read variable values in every mode (`list_variables` with `includeValues: true` for the catalog, `get_variable` for one variable in detail with alias-resolved values per mode), create/rename/delete variable modes and collections, write values into any mode (`set_variable_values(valuesByMode)`), and theme-switch whole frames/pages with `set_variable_mode`. Catalog listings are paged to keep responses token-cheap: `list_variables` / `get_local_components` / `get_styles` take `limit`/`offset` (default 500) and return `total` so you can page through large catalogs.
 - **Prototyping** — frame-to-frame links with typed transitions and easing (`set_transition_reaction`, `set_smart_animate_reaction`), multi-action triggers (`set_reactions`, `upsert_reaction`), overlays, flows, and start points.
-- **Motion (timeline animation)** — animate properties over a frame's timeline rather than between frames: manual keyframe tracks for transform, opacity, radius, size, spacing and path trim, plus indexed fill/stroke/effect color tracks (`set_keyframe_track`), Figma presets and file-authored custom animation styles (`list_animation_styles`, `list_custom_animation_styles`, `create_custom_animation_style`, `apply_animation_style` with `type: "CUSTOM"`), spring normalization (`normalize_spring`), and timeline length (`set_timeline_duration`). Read it all back with `get_motion` (includes `playheadPosition`). Requires Figma to have enabled Motion for your account; the tools say so plainly when it hasn't.
+- **Motion (timeline animation)** — animate properties over a frame's timeline rather than between frames: manual keyframe tracks for transform, opacity, radius, size, spacing, path trim, and the 3D fields `TRANSFORM_3D_TRANSLATION_Z` / `TRANSFORM_3D_ROTATION_X`/`_Y`/`_Z` / `SCENE_3D_PERSPECTIVE`, plus indexed fill/stroke/effect color tracks (`set_keyframe_track`), Figma presets and file-authored custom animation styles (`list_animation_styles`, `list_custom_animation_styles`, `create_custom_animation_style`, `apply_animation_style` with `type: "CUSTOM"`), spring normalization (`normalize_spring`), and timeline length (`set_timeline_duration`). Read it all back with `get_motion` (includes `playheadPosition`). Requires Figma to have enabled Motion for your account; the tools say so plainly when it hasn't.
 - **Color spaces and composed colors** — paints, gradient stops, and effects keep an authored `sourceColor` (`SRGB`, `DISPLAY_P3`, `HSL`, `HSB`, `OKLAB`, `OKLCH`) via `figma.util.solidPaint` / `rgba`. `convert_color` projects a color without editing the file. COLOR variables can be composed (`{color, opacity}`, opacity as a percentage, at least one side a variable alias). Scope a float to `COLOR_OPACITY` to limit it to opacity pickers. `get_document_info` reports `documentColorProfile`. Vertical auto layout can `WRAP`.
 - **Shaders** — `list_shaders` enumerates shader effects/fills available to the file. `import_shader_by_id` materializes one into the file; `apply_shader` applies it as an effect, fill, or stroke (with `properties` keyed by name or definition id).
+- **3D transforms & scenes** — real 3D on nodes (Figma Plugin API **Update 142**, beta). `set_transform_3d` sets a `transform3d` (`translateZ` px + `rotateX`/`rotateY`/`rotateZ` degrees, applied in CSS order; `NONE` removes it), `set_transform_origin` moves the pivot (`PERCENT`/`PIXELS`), and `set_scene_3d` gives a frame/component/instance a shared 3D space (`perspective` + `preserve3d`). A 3D transform never changes layout size or `relativeTransform`; note that `preserve3d` disables `opacity`/`effects`/`clipsContent` on that container. Read it back with `get_transform_3d` / `get_scene_3d`.
 - **Variable fonts** — `get_font_variation_axes` reads OpenType axes; `create_text` / `set_text_style` / `create_text_style` accept `variationSettings` (e.g. `{ wght: 550 }`).
 - **Live push events** — subscribe to `selectionchange` / `documentchange` so the agent can react to your selection or canvas without polling.
+- **Follow AI** — a plugin UI toggle (on by default) that lets the bridge select and focus. Turn it **off** while you edit the same file and the bridge stops selecting/zooming to layers it creates (and `set_focus` / `set_selections` no-op with `selectionDisabled`); the agent reads the state from `figma_bridge_status` (`allowSelectAndFocus`).
 - **Channel dashboard** — `list_channels` shows which file each connected channel belongs to.
 - **REST API extras** — file JSON, image downloads, bulk frame exports, file comments, and component search (with `FIGMA_TOKEN`). Video export of Motion frames (`MP4`/`GIF`/`WEBM` via `export_node_as_image`) is plugin-side and does not need a token.
 
@@ -109,7 +111,7 @@ Notes:
 
 The MCP config is not enough on its own. Zip the skill folder and upload that zip in your AI agent (Cursor, Claude, etc.) so the agent loads Figma write-bridge rules.
 
-1. Zip **`skills/figma-write-bridge/`** — the folder that *contains* `SKILL.md`, not the repo root and not the parent `skills/` directory.
+1. Zip the **`skills/`** folder — the folder that *contains* `SKILL.md`, not the repo root and not the parent `skills/` directory's siblings.
 2. Confirm the zip root is `SKILL.md` (open the zip: you should see `SKILL.md` immediately, not `figma-write-bridge/SKILL.md`).
 3. In your AI agent, upload / import that `.zip` as a skill (the agent's "Skills" or "Upload skill" UI).
 4. Restart or reload the agent if it does not pick up new skills automatically.
@@ -117,28 +119,29 @@ The MCP config is not enough on its own. Zip the skill folder and upload that zi
 PowerShell (from the repo root):
 
 ```powershell
-Compress-Archive -Path "skills\figma-write-bridge\*" -DestinationPath "figma-write-bridge-skill.zip" -Force
+Compress-Archive -Path "skills\*" -DestinationPath "skills.zip" -Force
 ```
 
 macOS / Linux:
 
 ```bash
-(cd skills/figma-write-bridge && zip -r ../../figma-write-bridge-skill.zip .)
+(cd skills && zip -r ../skills.zip .)
 ```
 
 The folder looks like this:
 
 ```
-skills/figma-write-bridge/
+skills/
 ├── SKILL.md          # always-on rules (~90 lines)
 ├── setup.md          # preconditions and channels
 ├── library.md        # file-library catalog
 ├── layout.md         # auto layout, hug/fill, placement, default fills
 ├── schema.md         # closed schema + error table
 ├── handoff.md        # screen annotations
+├── naming.md         # layer/component/variable naming + structure for code
 ├── tools.md          # full tool catalog
 ├── heuristics.md     # product-designer rules
-└── playbooks.md      # copy / screen / component / prototype / motion
+└── playbooks.md      # copy / screen / component / prototype / motion / 3D
 ```
 
 `SKILL.md` links those files one level deep; the agent should read only the file the current step needs. Re-zip and re-upload after you pull skill updates.

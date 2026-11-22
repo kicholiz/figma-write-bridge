@@ -44,3 +44,12 @@
 4. otherwise `set_keyframe_track` per property — remember transform fields compose with the resting transform (neutral `0`, or `1` for scale)
 5. the timeline auto-extends to fit; call `set_timeline_duration` only to set an explicit length
 6. `get_motion` again to confirm the tracks landed, and annotate the motion intent for dev handoff
+
+### Give an element 3D depth or tilt
+1. `get_transform_3d` on the element to read its current `transform3d`/`transformOrigin` and confirm `supportsTransform3d`
+2. if the tilt should share space with siblings (cards in a fanned row, a rotating cube), `set_scene_3d` on the **parent frame/component/instance** first — `preserve3d: true` plus a `perspective`; remember this flattens `opacity`/`effects`/`clipsContent` on that container, so keep shadows and clips off it
+3. `set_transform_3d` with `{ type: "FIXED_ORDER", rotateX/rotateY/rotateZ, translateZ }` — change one axis at a time; omitted fields keep their current value
+4. `set_transform_origin` if the tilt should hinge on an edge or a custom point rather than the centre
+5. `get_transform_3d` again to confirm, and note that a 3D transform does not affect layout size
+6. to animate the motion, ensure the node keeps a `FIXED_ORDER` transform, then `set_keyframe_track` with `TRANSFORM_3D_*` fields (see [tools.md](tools.md))
+7. flag to the user that 3D transforms are **beta** (Plugin API Update 142) before shipping them

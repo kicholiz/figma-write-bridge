@@ -26,6 +26,7 @@ Keep references one level deep. Read only the file the current step needs:
 - [layout.md](layout.md) — auto layout, hug/fill, placing into frames / stacks / slots, default fills
 - [schema.md](schema.md) — closed schema for fills/effects/grids/reactions, error table
 - [handoff.md](handoff.md) — required screen annotations for dev handoff
+- [naming.md](naming.md) — layer/component/variable naming + structure conventions for code handoff
 - [tools.md](tools.md) — full tool catalog (MCP schemas remain the source of truth for parameters)
 - [heuristics.md](heuristics.md) — product-designer rules (text, grid, motion, shaders, variable fonts)
 - [playbooks.md](playbooks.md) — copy, new screen, component, prototype, motion
@@ -42,6 +43,8 @@ Before `create_frame` / `create_rectangle` / `create_text` / `create_vector` for
 
 Primitives are only for layout containers, true one-offs, or when the user asked to build from scratch. No catalog match → ask before creating a new component or drawing a one-off. Bind existing variables/styles instead of hardcoding. Full rules: [library.md](library.md).
 
+When you do create a new component (after the user confirms), build it on the file's existing variables and styles — a new component with hardcoded values is design-system drift even if the component itself is new. Read the Variables section of the library, map each property to an existing variable/style, prefer binding (`bind_color_variable_to_fill` / `bind_variable_to_property`) over raw setters, and pick the nearest **semantic** token rather than the nearest hex. Only create a new token when nothing in the file is semantically close.
+
 ## Safety Rules
 
 - Treat Figma edits as high-impact. Read first, then write. Prefer small reversible changes.
@@ -57,7 +60,7 @@ Primitives are only for layout containers, true one-offs, or when the user asked
 3. **Scope.** `set_target_frame` on the agreed frame (or `create_frame` then treat it as the work area).
 4. **Inspect** the target with `read_my_design` / `get_node_info` / `find_nodes` — library first, live tools only for what it does not answer.
 5. **Mutate** in this order: update text/instance properties → apply styles/variables → instantiate catalog components → clone → primitives for layout only → delete only if asked. Place new nodes with `parentNodeId` + `index`; never `move_node` inside auto layout — [layout.md](layout.md).
-6. **Handoff.** New screens are not done until annotated — [handoff.md](handoff.md).
+6. **Handoff.** New screens are not done until they are named for code and annotated — clean up generic layer names ([naming.md](naming.md)) and add the screen annotations ([handoff.md](handoff.md)).
 7. **Verify.** Re-read affected nodes. Report counts and names, not raw payloads.
 
 ## Tool Map
@@ -84,7 +87,10 @@ Never echo a value you read back into a setter — [schema.md](schema.md).
 - Wide-gamut color: pass `sourceColor` or a CSS color (`oklch()`, `hsl()`) on fills, strokes, and gradient stops. `convert_color` projects it without editing the file
 - Motion export: `export_node_as_image` with `MP4` / `GIF` / `WEBM`
 - Clicks between screens → prototype reactions. Fades/slides on an element → Motion keyframes on a **descendant**
+- 3D depth/tilt (beta, Update 142): `get_transform_3d` → `set_transform_3d` (FIXED_ORDER), plus `set_scene_3d` (`preserve3d` + `perspective`) on the parent frame for real depth. It never changes layout size; `preserve3d` disables `opacity`/`effects`/`clipsContent` on that container. Animate with `set_keyframe_track` `TRANSFORM_3D_*` fields
+- **Follow AI** (plugin UI toggle, on by default) lets the bridge select and zoom. When the author turns it **off** while editing the same file, the bridge never changes their selection or viewport — creates/imports/group/distribute stop auto-selecting too — and `set_focus`/`set_selections` return `{ success: false, selectionDisabled: true }`. Read `allowSelectAndFocus` from `figma_bridge_status` and adapt instead of fighting it.
 - `>3` related edits → `run_batch` (checkpoint first if blast radius is real)
+- Code-ready naming: replace Figma defaults (`Frame 427`, `Group 12`, `Rectangle 4`) with role-based names before handoff — `find_nodes` with `nameRegex` to locate them, `bulk_rename` (`dryRun` first) to fix — [naming.md](naming.md)
 - Most frames have **no fill**. Auto layout for 1D, grid layout for 2D. Place with `parentNodeId` + `index`; `move_node` is for freeform only — [layout.md](layout.md)
 
 ## Context And Output

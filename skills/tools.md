@@ -5,7 +5,7 @@ MCP tool schemas are the source of truth for parameters. Read this file when you
 ## Tool Guide
 
 ### Core Status And Routing
-- `figma_bridge_status`: confirm the bridge is connected; reports the active channel (the server's `FIGMA_BRIDGE_CHANNEL`, `default` unless overridden) and every connected channel with its `fileKey`/`fileName`
+- `figma_bridge_status`: confirm the bridge is connected; reports the active channel (the server's `FIGMA_BRIDGE_CHANNEL`, `default` unless overridden) and every connected channel with its `fileKey`/`fileName`, plus `allowSelectAndFocus` — the plugin UI's "Follow AI" toggle; `false` means the author turned it off to edit the file uninterrupted (see `set_focus`)
 - `join_channel`: switch the active channel to a different connected Figma file/channel (channel names come from `figma_bridge_status`)
 - `list_channels`: dashboard of every connected plugin channel with its fileKey/fileName and connection time (useful when several files are open)
 
@@ -33,8 +33,8 @@ Pass `verbose: true` to any of the five to get the original array-of-objects (or
 - `get_selection_context` — bundles selection + node info + (for instances) main component id, property definitions, current property values, and slots in one call. Prefer this over chaining `get_selection` → `get_node_info` → `get_component_property_definitions` when you need more than just id/name/type.
 - `find_nodes` — server-side predicate query; the node graph is filtered inside Figma and only matches come back, so "all red button instances" or "all hardcoded fills with no style" costs a handful of rows instead of a full tree dump filtered in context. Predicates (all optional, ANDed): `types`, `name` (glob), `nameRegex`, `textContains`, `fillHex` (+ `fillTolerance` for near-shades), `fillStyleId`, `textStyleId`, `missingFillStyle` (hardcoded color with no style/variable — design-system drift), `hasBoundVariable`/`boundVariableId`, `hasOverrides`/`mainComponentName` (instances), `visible`, `rootNodeId`, `allPages`. Paginate with `limit`/`offset`; `total`/`truncated` reflect the full match count, not just the returned page. Prefer this over `scan_nodes_by_types` or `get_document_tree` + manual filtering whenever the query is more selective than "give me every node of type X".
 - `read_my_design`
-- `set_focus` — select one node and scroll the viewport to it, switching to its page first. Use it to show the user what you just built or found (ids from a cross-page `find_nodes` work directly).
-- `set_selections` — select several nodes at once. Switches to the first node's page; Figma scopes selection to one page, so anything elsewhere comes back in `skippedOnOtherPages`.
+- `set_focus` — select one node and scroll the viewport to it, switching to its page first. Use it to show the user what you just built or found (ids from a cross-page `find_nodes` work directly). When the plugin UI's "Follow AI" toggle is off (the author is editing the same file), it returns `{ success: false, selectionDisabled: true }` and changes nothing — check `allowSelectAndFocus` in `figma_bridge_status`, or just treat the node id as confirmation.
+- `set_selections` — select several nodes at once. Switches to the first node's page; Figma scopes selection to one page, so anything elsewhere comes back in `skippedOnOtherPages`. Also returns `selectionDisabled` while "Follow AI" is off, same as `set_focus`.
 - `get_node_info`
 - `get_nodes_info`
 - `scan_text_nodes`
@@ -52,6 +52,7 @@ Pass `verbose: true` to any of the five to get the original array-of-objects (or
 - `get_font_list` — distinct fonts (family + style, plus `variationSettings` when a variable font is used) on the current page or a `rootNodeId` subtree, with usage counts. Use this before deciding whether a new `create_text_style` can reuse an existing family.
 - `get_font_variation_axes` — OpenType axes a family exposes (`wght`, `slnt`, `opsz`, …), or `variable: false` for a static family. Call this before writing `variationSettings`. Requires Plugin API Update 138.
 - `get_style_guide` — extract a usage style guide from the current page (or a `rootNodeId` subtree): counted solid colors (hex), color variable bindings, font combos/sizes/line heights, spacing/gap/padding values, corner radii, stroke weights, and opacities. Use it to summarize "what does this page use" without dumping raw nodes.
+- `get_node_css` — a node's CSS as a flat property map (`node.getCSSAsync`). Use it for handoff-to-code or to check a computed value on a single layer; it is a read (no file change). Requires Plugin API Update 136.
 
 `get_node_info`, `get_nodes_info`, and `read_my_design` also accept a `fields` array (e.g. `["fills"]` or `["characters"]`) to return only those top-level fields per node instead of the full set — use it when you only need one or two properties across many nodes.
 
@@ -149,13 +150,21 @@ Pass `verbose: true` to any of the five to get the original array-of-objects (or
 ### Motion (Timeline Animation)
 Distinct from prototype reactions: reactions link frames on click, Motion animates properties over a timeline **inside** one top-level frame. The whole surface is gated behind a Figma feature flag — `get_motion` returns `motionEnabled: false` when the account lacks it, and the write tools return one clear error. Do not retry on that error.
 - `get_motion` — read timelines (durations in seconds), the current `playheadPosition` (seconds; undefined when no timeline is active), manual keyframe tracks, applied animation styles, and resolved animations, for given nodes or the current selection. Always start here.
-- `set_keyframe_track` — add/replace one track. `field` is a property (`TRANSLATION_X`/`_Y`/`_XY`, `ROTATION`, `SCALE_X`/`_Y`/`_XY`, `OPACITY`, `CORNER_RADIUS` and the per-corner variants, `STROKE_WEIGHT` and the per-border variants, `WIDTH`, `HEIGHT`, `STACK_*`/`GRID_*` spacing, `PATH_TRIM_START`/`_END`) — or `FILLS`/`STROKES`/`EFFECTS` **with a `paintIndex`** for color/effect animation.
+- `set_keyframe_track` — add/replace one track. `field` is a property (`TRANSLATION_X`/`_Y`/`_XY`, `ROTATION`, `SCALE_X`/`_Y`/`_XY`, `OPACITY`, `CORNER_RADIUS` and the per-corner variants, `STROKE_WEIGHT` and the per-border variants, `WIDTH`, `HEIGHT`, `STACK_*`/`GRID_*` spacing, `PATH_TRIM_START`/`_END`, and the 3D fields `TRANSFORM_3D_TRANSLATION_Z`, `TRANSFORM_3D_ROTATION_X`/`_Y`/`_Z`, `SCENE_3D_PERSPECTIVE`) — or `FILLS`/`STROKES`/`EFFECTS` **with a `paintIndex`** for color/effect animation. The 3D fields need a `FIXED_ORDER` `transform3d` on the node (`FREEFORM` cannot be keyframed); Z is px, rotations are degrees.
 - `remove_keyframe_track` — drop one track by field, or `all: true` to clear them.
 - `list_animation_styles` / `apply_animation_style` / `remove_animation_style` — reusable animation presets. List first for a real `styleId`; `duration` and `timelineOffset` are seconds and top-level, not `props`. Verify against `animationStyles` in the response, not `animations`. Pass `type: "CUSTOM"` to apply a file-authored style (only `timelineOffset` is configurable).
 - `list_custom_animation_styles` / `create_custom_animation_style` / `add_animation_entry` / `remove_animation_entry` / `delete_custom_animation_style` — local custom Motion styles (`figma.createCustomAnimationStyle`, `getLocalCustomAnimationStylesAsync`, `addAnimationEntryAsync`, `removeAnimationEntry`). Each entry's `styleId` comes from `list_animation_styles`. Delete needs `confirmDelete: true`.
 - `reorder_custom_animation_style` / `reorder_custom_animation_folder` — `moveLocalCustomAnimationStyleAfter` / `moveLocalCustomAnimationFolderAfter`. Omit the reference to move the target first. Folder names are the slash prefix (`Motion/Enter`), not the style name.
 - `normalize_spring` — `figma.motion.physicalSpringToNormalized({mass, stiffness, damping})` → bounce from 0 to 1.
 - `set_timeline_duration` — set the containing top-level frame's timeline length in seconds.
+
+### 3D Transforms & Scenes (Plugin API Update 142 — beta)
+Real 3D transforms on nodes that previously could only rotate in 2D. A 3D transform changes how a node **renders**; it never changes the node's layout size or `relativeTransform`. Still beta — Figma may change the surface.
+- `get_transform_3d` — read a node's `transform3d`, `transformOrigin`, and `scene3d` in one call, plus `supportsTransform3d`. Use it before changing one axis so you know the current values.
+- `set_transform_3d` — `type: "NONE"` removes an existing transform; `type: "FIXED_ORDER"` sets `translateZ` (px) and `rotateX`/`rotateY`/`rotateZ` (degrees), applied in the CSS order `translateZ() rotateX() rotateY() rotateZ()`. Fields you omit keep the node's current value (or `0` when there is none yet), so you can nudge one axis at a time. `FREEFORM` is import-only and cannot be assigned. All numeric fields must be finite; negatives are allowed. Supported on frames, groups, components, instances, shapes, text, and vector nodes.
+- `get_transform_origin` / `set_transform_origin` — the 3D rotation/scale anchor, like CSS `transform-origin`: `x`/`y` each `{unit: "PERCENT"|"PIXELS", value}`, default 50%/50%. Changing the origin can move the rendered node even without changing the transform. An omitted axis keeps its current value.
+- `get_scene_3d` / `set_scene_3d` — a container's 3D space (**frames, components, and instances only**). `perspective` is a distance in px (negative disables perspective; `-1` is the default; `0`–`1` clamps to `1px`); `preserve3d` toggles CSS `transform-style: preserve-3d` vs `flat`, letting children share one 3D space. Pass `scene3d: null` to clear a scene — on an instance this opts it out of the main component's inherited scene. **When `preserve3d` is true, `opacity`, `blendMode`, `effects` (including effect styles), and `clipsContent` have no visual effect on that container.**
+- To animate 3D, use `set_keyframe_track` with the 3D fields (`TRANSFORM_3D_*`, `SCENE_3D_PERSPECTIVE`) — see above.
 
 ### Shaders
 A shader must be imported into the file before it can be applied. `list_shaders` returns owned/library shaders with `imported: false` until you import them.

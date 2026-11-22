@@ -18,6 +18,7 @@ The bridge normalizes every one of these payloads for you, so you generally just
 - **Composed color variables** — `{color, opacity}` where at least one side is a variable alias. `opacity` is a percentage (`60`), not 0–1. A FLOAT limited to opacity pickers uses `scopes: ["COLOR_OPACITY"]`.
 - **Grid layout** — `gridAutoTracks` is `NONE`/`ROWS` and `gridItemsPositioning` is `MANUAL`/`ROW_AUTO_FLOW`; track types are `FLEX`/`FIXED`/`HUG`.
 - **Motion easing** — the transition easings plus `HOLD`. `EASE_IN_AND_OUT` is the correct spelling; `EASE_IN_OUT` is rejected, as are internal names like `OUT_CUBIC`.
+- **3D transforms** — `transform3d` is either `{type:"NONE"}` (removes) or `{type:"FIXED_ORDER", translateZ, rotateX, rotateY, rotateZ, backfaceVisible?, visible?}` (all four numbers required and finite). `FREEFORM` is import-only — never send it back. `transformOrigin` is `{x:{unit:"PERCENT"|"PIXELS", value}, y:{…}}`. `scene3d` is `{perspective, preserve3d, visible?}` or `null`. Reads are read-only objects: spread the current value and reassign rather than mutating in place.
 
 Under `documentAccess: "dynamic-page"` (this plugin's manifest) two more rules apply, and the bridge already handles both — do not work around them:
 - Pages load lazily. Anything that traverses the whole document loads all pages first, which is why file-wide reads cost more than page-scoped ones. Prefer `rootNodeId`/page scope over `allPages: true` unless you need it.
@@ -59,3 +60,7 @@ Error messages worth recognizing:
 | `span exceeds grid column count` / the bridge's `columnSpan … exceeds the grid's N columns` | A grid child was given a span that runs past the last track | Raise `columnCount` via `set_grid_layout`, or reduce the span |
 | `Cannot set child to specified column span due to existing children in adjacent columns` | The span would cross a cell another child already occupies | Place and widen the spanning child before adding its neighbours, or move the blocking child first |
 | `This is a top-level frame, which owns the timeline` | Keyframes were aimed at the frame that owns the timeline | Animate a descendant, or pass `allowTopLevelFrame: true` if you really mean it |
+| `Node type <T> does not support transform3d` / `… transformOrigin` / `… scene3d` | The node type cannot carry that 3D property (scene3d is frames/components/instances only), or Figma Desktop predates Plugin API Update 142 | Pick a supported node; otherwise ask the user to update Figma Desktop |
+| `Unsupported transform3d type: FREEFORM` | FREEFORM was sent as a value — it is import-only | Send `NONE` or `FIXED_ORDER`; to change a FREEFORM node, assign a fresh `FIXED_ORDER` |
+| `transform3d.<field> must be a finite number` | A NaN/`null`/string slipped into a transform field | Send finite numbers for `translateZ`/`rotateX`/`rotateY`/`rotateZ` |
+| 3D keyframe on a node with no `FIXED_ORDER` transform | 3D Motion fields need a `FIXED_ORDER` `transform3d`; `FREEFORM` cannot be keyframed | Call `set_transform_3d` (`type: "FIXED_ORDER"`) first, then keyframe |
