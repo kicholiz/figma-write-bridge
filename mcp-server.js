@@ -337,12 +337,17 @@ function connectedChannelsInfo() {
 function markSocketRole(socket, role) {
   const prev = socketMeta.get(socket) || {};
   const connectedAt = prev.connectedAt ?? Date.now();
-  socketMeta.set(socket, {
+  const next = {
     connectedAt,
     role: String(role),
     fileKey: prev.fileKey || null,
     fileName: prev.fileName || null
-  });
+  };
+  // The follow-AI policy lives on the socket meta too. This runs again on every
+  // "result" message, so dropping the flag here would silently reset the plugin
+  // UI's toggle back to the default (true) after any command.
+  if (typeof prev.allowSelectAndFocus === "boolean") next.allowSelectAndFocus = prev.allowSelectAndFocus;
+  socketMeta.set(socket, next);
 }
 
 function getFallbackSocket() {
